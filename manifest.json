@@ -1,0 +1,10 @@
+{
+  "id": "neogdsync",
+  "name": "NeoGDSync",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.0",
+  "description": "Lightweight Google Drive sync — tiny data.json, path-based index, conflict detection, versioning.",
+  "author": "LM",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
