@@ -3,7 +3,7 @@
   "name": "NeoGDSync",
   "version": "0.1.0",
   "minAppVersion": "1.6.0",
-  "description": "Lightweight Google Drive sync — tiny data.json, path-based index, conflict detection, versioning.",
+  "description": "Lightweight Google Drive sync with path-based index, conflict detection, and Smart/Push/Pull modes.",
   "author": "LM",
   "authorUrl": "",
   "isDesktopOnly": false
