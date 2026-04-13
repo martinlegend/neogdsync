@@ -76,4 +76,8 @@ export class VaultSnapshot {
   get(path: string) {
     return this.snapshot[path];
   }
+
+  getAll(): Snapshot {
+    return this.snapshot;
+  }
 }

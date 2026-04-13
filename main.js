@@ -457,6 +457,9 @@ var VaultSnapshot = class {
   get(path) {
     return this.snapshot[path];
   }
+  getAll() {
+    return this.snapshot;
+  }
 };
 
 // src/syncer.ts
@@ -797,6 +800,7 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   async onunload() {
     await this.saveSettings();
     await this.index.save();
+    await this.snapshot.save((p) => this.exclude(p));
   }
   // ── Vault events ───────────────────────────────────────────────
   registerEvents() {
@@ -856,6 +860,13 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.debouncedSave();
   }
   mergeOfflineDiff() {
+    const snapshotEmpty = Object.keys(this.snapshot.getAll ? this.snapshot.getAll() : {}).length === 0;
+    if (snapshotEmpty) {
+      // No snapshot yet — save current vault state as baseline, don't flood pendingOps
+      console.log("[NeoGDSync] No snapshot found — saving current vault as baseline, skipping offline diff");
+      this.snapshot.save((p) => this.exclude(p)).catch(console.error);
+      return;
+    }
     const diff = this.snapshot.computeDiff((p) => this.exclude(p));
     let count = 0;
     for (const [path, op] of Object.entries(diff)) {

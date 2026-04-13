@@ -82,6 +82,7 @@ export default class NeoGDSync extends Plugin {
   async onunload() {
     await this.saveSettings();
     await this.index.save();
+    await this.snapshot.save(p => this.exclude(p));
   }
 
   // ── Vault events ───────────────────────────────────────────────
@@ -150,6 +151,13 @@ export default class NeoGDSync extends Plugin {
   }
 
   private mergeOfflineDiff() {
+    const existing = this.snapshot.getAll();
+    if (Object.keys(existing).length === 0) {
+      // No snapshot yet — save current vault as baseline, don't flood pendingOps
+      console.log('[NeoGDSync] No snapshot found — saving current vault as baseline');
+      this.snapshot.save(p => this.exclude(p)).catch(console.error);
+      return;
+    }
     const diff = this.snapshot.computeDiff(p => this.exclude(p));
     let count = 0;
     for (const [path, op] of Object.entries(diff)) {
