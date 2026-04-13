@@ -32,6 +32,11 @@ export class VaultSnapshot {
       }
     }
     this.snapshot = fresh;
+    // Ensure .neogdsync/ directory exists before writing
+    const dir = normalizePath('.neogdsync');
+    if (!(await this.app.vault.adapter.exists(dir))) {
+      await this.app.vault.adapter.mkdir(dir);
+    }
     await this.app.vault.adapter.write(
       normalizePath(SNAPSHOT_PATH),
       JSON.stringify(fresh),

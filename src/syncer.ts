@@ -64,6 +64,10 @@ export class Syncer {
 
     // Step 2: fetch Drive changes since last sync
     this.onProgress('Fetching Drive changes…');
+    // If no changesToken yet, get a fresh start page token first
+    if (!this.settings.changesToken) {
+      this.settings.changesToken = await this.drive.getStartPageToken();
+    }
     const { changes, newToken } = await this.drive.getChanges(this.settings.changesToken);
     const driveChanged = new Map<string, { removed: boolean; mtime?: string }>();
     for (const c of changes) {
@@ -96,9 +100,16 @@ export class Syncer {
         if (op === 'delete') {
           await this.handleDelete(path, result);
         } else {
+          // Real conflict = Drive mtime is NEWER than what we last recorded in the index
+          // This is token-independent and avoids false conflicts from stale changesTokens
           const driveChange = driveChanged.get(path);
-          if (driveChange && !driveChange.removed && driveChange.mtime) {
-            // Both sides changed — conflict
+          const indexEntry = this.index.get(path);
+          const isDriveNewer = driveChange
+            && !driveChange.removed
+            && driveChange.mtime
+            && indexEntry
+            && driveChange.mtime > indexEntry.driveMtime;
+          if (isDriveNewer) {
             await this.handleConflict(path, driveChange.mtime, result);
           } else {
             await this.handlePush(path, op, result);
@@ -144,6 +155,10 @@ export class Syncer {
       }
     }
     this.settings.lastSyncedAt = Date.now();
+    // Initialize changesToken after first push so smart sync can track Drive changes going forward
+    if (!this.settings.changesToken) {
+      this.settings.changesToken = await this.drive.getStartPageToken();
+    }
     await this.snapshot.save(p => this.exclude(p));
     await this.index.save();
     for (const p of [...result.pushed, ...result.deleted]) {
@@ -189,12 +204,12 @@ export class Syncer {
     const mimeType = mime.fromPath(path);
     const cached = this.index.get(path);
 
-    if (cached && !cached.isFolder && op === 'modify') {
-      // Update existing
+    if (cached && !cached.isFolder) {
+      // File already exists on Drive — update in place, never create duplicate
       await this.drive.updateFile(cached.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached, driveMtime: mtime, syncedAt: Date.now() });
     } else {
-      // Upload new — resolve/create parent folder first
+      // File not in index → truly new, upload
       const parentId = await this.index.resolveParentFolder(path);
       const driveId = await this.drive.uploadFile(
         file.name, parentId, bytes, mimeType, mtime, this.settings.keepRevisions,

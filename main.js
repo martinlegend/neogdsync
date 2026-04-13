@@ -390,8 +390,9 @@ var PathIndex = class {
 };
 async function ensureDir(app, path) {
   const norm = (0, import_obsidian.normalizePath)(path);
-  const exists = await app.vault.adapter.exists(norm);
-  if (!exists) await app.vault.createFolder(norm);
+  if (!(await app.vault.adapter.exists(norm))) {
+    await app.vault.adapter.mkdir(norm);
+  }
 }
 
 // src/snapshot.ts
@@ -419,6 +420,10 @@ var VaultSnapshot = class {
       }
     }
     this.snapshot = fresh;
+    const snapDir = (0, import_obsidian2.normalizePath)(".neogdsync");
+    if (!(await this.app.vault.adapter.exists(snapDir))) {
+      await this.app.vault.adapter.mkdir(snapDir);
+    }
     await this.app.vault.adapter.write(
       (0, import_obsidian2.normalizePath)(SNAPSHOT_PATH),
       JSON.stringify(fresh)
@@ -524,6 +529,9 @@ var Syncer = class {
       }
     }
     this.onProgress("Fetching Drive changes\u2026");
+    if (!this.settings.changesToken) {
+      this.settings.changesToken = await this.drive.getStartPageToken();
+    }
     const { changes, newToken } = await this.drive.getChanges(this.settings.changesToken);
     const driveChanged = /* @__PURE__ */ new Map();
     for (const c of changes) {
@@ -553,7 +561,9 @@ var Syncer = class {
           await this.handleDelete(path, result);
         } else {
           const driveChange = driveChanged.get(path);
-          if (driveChange && !driveChange.removed && driveChange.mtime) {
+          const indexEntry = this.index.get(path);
+          const isDriveNewer = driveChange && !driveChange.removed && driveChange.mtime && indexEntry && driveChange.mtime > indexEntry.driveMtime;
+          if (isDriveNewer) {
             await this.handleConflict(path, driveChange.mtime, result);
           } else {
             await this.handlePush(path, op, result);
@@ -590,6 +600,9 @@ var Syncer = class {
       }
     }
     this.settings.lastSyncedAt = Date.now();
+    if (!this.settings.changesToken) {
+      this.settings.changesToken = await this.drive.getStartPageToken();
+    }
     await this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
     for (const p of [...result.pushed, ...result.deleted]) {
@@ -629,7 +642,8 @@ var Syncer = class {
     const mtime = new Date(file.stat.mtime).toISOString();
     const mimeType = fromPath(path);
     const cached2 = this.index.get(path);
-    if (cached2 && !cached2.isFolder && op === "modify") {
+    if (cached2 && !cached2.isFolder) {
+      // File exists in Drive index → update in place, never create duplicate
       await this.drive.updateFile(cached2.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached2, driveMtime: mtime, syncedAt: Date.now() });
     } else {
@@ -710,7 +724,7 @@ async function writeLocal(app, path, bytes) {
   if (parts.length > 1) {
     const dir = (0, import_obsidian3.normalizePath)(parts.slice(0, -1).join("/"));
     if (!await app.vault.adapter.exists(dir)) {
-      await app.vault.createFolder(dir);
+      await app.vault.adapter.mkdir(dir);
     }
   }
   const existing = app.vault.getAbstractFileByPath(norm);

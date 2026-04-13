@@ -185,6 +185,7 @@ export class PathIndex {
 
 async function ensureDir(app: App, path: string): Promise<void> {
   const norm = normalizePath(path);
-  const exists = await app.vault.adapter.exists(norm);
-  if (!exists) await app.vault.createFolder(norm);
+  if (!(await app.vault.adapter.exists(norm))) {
+    await app.vault.adapter.mkdir(norm);
+  }
 }
