@@ -1,8 +1,8 @@
 import {
-  Plugin, Notice, TFile, TFolder, TAbstractFile,
+  Plugin, Notice, TFile, TAbstractFile,
   PluginSettingTab, App, Setting, Modal, normalizePath,
 } from 'obsidian';
-import { NeoSettings, DEFAULT_SETTINGS, PendingOps, ConflictRecord } from './types';
+import { NeoSettings, DEFAULT_SETTINGS, PendingOps, ConflictRecord, Snapshot } from './types';
 import { DriveApi } from './driveApi';
 import { PathIndex } from './pathIndex';
 import { VaultSnapshot } from './snapshot';
@@ -16,27 +16,30 @@ export default class NeoGDSync extends Plugin {
 
   drive!: DriveApi;
   index!: PathIndex;
-  private snapshot!: VaultSnapshot;
+  snapshot!: VaultSnapshot;
   private syncing = false;
   private statusEl?: HTMLElement;
 
   // ── Lifecycle ──────────────────────────────────────────────────
 
   async onload() {
-    await this.loadSettings();
-    this.drive   = new DriveApi(this.settings.refreshToken);
-    this.index   = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
+    // Create snapshot BEFORE loadSettings so setRaw() can be called inside it
     this.snapshot = new VaultSnapshot(this.app);
+    await this.loadSettings();
 
-    // Load index + snapshot
+    this.drive = new DriveApi(this.settings.refreshToken);
+    this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
     await this.index.load();
-    await this.snapshot.load();
+    // snapshot already loaded via setRaw() in loadSettings()
 
-    // Startup diff — catch offline changes
-    this.mergeOfflineDiff();
-
-    // Register vault event listeners
-    this.registerEvents();
+    // IMPORTANT: delay both offline diff AND event registration until layout is ready.
+    // Before onLayoutReady, vault.getFiles() returns stale/incorrect stat values
+    // (mtime/size), which causes computeDiff to falsely flag all files as changed.
+    this.app.workspace.onLayoutReady(() => {
+      console.log(`[NeoGDSync] onLayoutReady: vault has ${this.app.vault.getFiles().length} files`);
+      this.mergeOfflineDiff();
+      this.registerEvents();
+    });
 
     // Ribbon icon
     const ribbonIcon = this.addRibbonIcon('cloud', 'NeoGDSync', () => this.openSyncModal());
@@ -47,42 +50,29 @@ export default class NeoGDSync extends Plugin {
     this.updateStatus();
 
     // Commands
-    this.addCommand({
-      id: 'smart-sync',
-      name: 'Smart Sync (auto conflict detect)',
-      callback: () => this.runSync('smart'),
-    });
-    this.addCommand({
-      id: 'force-push',
-      name: 'Force Push (local → Drive)',
-      callback: () => this.runSync('push'),
-    });
-    this.addCommand({
-      id: 'force-pull',
-      name: 'Force Pull (Drive → local)',
-      callback: () => this.runSync('pull'),
-    });
-    this.addCommand({
-      id: 'rebuild-index',
-      name: 'Rebuild Drive index',
-      callback: () => this.rebuildIndex(),
-    });
-    this.addCommand({
-      id: 'show-conflicts',
-      name: 'Show conflicts',
-      callback: () => this.showConflicts(),
-    });
+    this.addCommand({ id: 'smart-sync', name: 'Smart Sync (auto conflict detect)', callback: () => this.runSync('smart') });
+    this.addCommand({ id: 'force-push', name: 'Force Push (local → Drive)',         callback: () => this.runSync('push') });
+    this.addCommand({ id: 'force-pull', name: 'Force Pull (Drive → local)',          callback: () => this.runSync('pull') });
+    this.addCommand({ id: 'rebuild-index', name: 'Rebuild Drive index',              callback: () => this.rebuildIndex() });
+    this.addCommand({ id: 'show-conflicts', name: 'Show conflicts',                  callback: () => this.showConflicts() });
 
     // Settings tab
     this.addSettingTab(new NeoSettingsTab(this.app, this));
+
+    // URI handler: obsidian://neogdsync?mode=smart|push|pull
+    this.registerObsidianProtocolHandler('neogdsync', (params) => {
+      const mode = params.mode === 'push' ? 'push' : params.mode === 'pull' ? 'pull' : 'smart';
+      this.runSync(mode);
+    });
 
     new Notice('NeoGDSync loaded ✓');
   }
 
   async onunload() {
+    // snapshot.save() MUST come before saveSettings() so fresh stats are persisted
+    await this.snapshot.save(p => this.exclude(p));
     await this.saveSettings();
     await this.index.save();
-    await this.snapshot.save(p => this.exclude(p));
   }
 
   // ── Vault events ───────────────────────────────────────────────
@@ -94,19 +84,21 @@ export default class NeoGDSync extends Plugin {
     this.registerEvent(this.app.vault.on('rename', (f, old) => this.handleRename(f, old)));
   }
 
-  private exclude(path: string): boolean {
+  exclude(path: string): boolean {
     if (path.startsWith('.neogdsync')) return true;
+    if (path.startsWith('.obsidian'))  return true;
     if (path.startsWith('.smart-env')) return true;
-    if (path.startsWith('.smtcmp')) return true;
-    if (path.endsWith('.DS_Store')) return true;
+    if (path.startsWith('.smtcmp'))    return true;
+    if (path.endsWith('.DS_Store'))    return true;
     return false;
   }
 
   private handleCreate(f: TAbstractFile) {
     if (this.exclude(f.path)) return;
+    if (!(f instanceof TFile)) return; // skip folders
     const cur = this.pendingOps[f.path];
     if (cur === 'delete') {
-      this.pendingOps[f.path] = f instanceof TFile ? 'modify' : 'create';
+      this.pendingOps[f.path] = 'modify';
     } else if (!cur) {
       this.pendingOps[f.path] = 'create';
     }
@@ -116,6 +108,9 @@ export default class NeoGDSync extends Plugin {
 
   private handleModify(f: TAbstractFile) {
     if (this.exclude(f.path) || !(f instanceof TFile)) return;
+    // Skip if file matches snapshot (avoids false positives on startup events)
+    const snap = this.snapshot.get(f.path);
+    if (snap && Math.abs(f.stat.mtime - snap.mtime) <= 2000 && f.stat.size === snap.size) return;
     if (!this.pendingOps[f.path]) {
       this.pendingOps[f.path] = 'modify';
     }
@@ -137,7 +132,6 @@ export default class NeoGDSync extends Plugin {
 
   private handleRename(f: TAbstractFile, oldPath: string) {
     if (this.exclude(f.path) && this.exclude(oldPath)) return;
-    // Delete old path op, create new path op
     if (this.pendingOps[oldPath] === 'create') {
       delete this.pendingOps[oldPath];
       this.pendingOps[f.path] = 'create';
@@ -151,24 +145,40 @@ export default class NeoGDSync extends Plugin {
   }
 
   private mergeOfflineDiff() {
-    const existing = this.snapshot.getAll();
-    if (Object.keys(existing).length === 0) {
-      // No snapshot yet — save current vault as baseline, don't flood pendingOps
-      console.log('[NeoGDSync] No snapshot found — saving current vault as baseline');
-      this.snapshot.save(p => this.exclude(p)).catch(console.error);
+    const snapData = this.snapshot.getAll();
+    const snapCount = Object.keys(snapData).length;
+    const vaultCount = this.app.vault.getFiles().length;
+    console.log(`[NeoGDSync] mergeOfflineDiff: snapshot=${snapCount} entries, vault=${vaultCount} files`);
+
+    if (snapCount === 0) {
+      console.log('[NeoGDSync] No snapshot — saving current vault as baseline, skipping offline diff');
+      this.snapshot.save(p => this.exclude(p)).then(() => this.saveSettings()).catch(console.error);
       return;
     }
+
     const diff = this.snapshot.computeDiff(p => this.exclude(p));
-    let count = 0;
-    for (const [path, op] of Object.entries(diff)) {
-      if (!this.pendingOps[path]) {
-        this.pendingOps[path] = op;
-        count++;
+    const diffEntries = Object.entries(diff);
+    console.log(`[NeoGDSync] computeDiff returned ${diffEntries.length} ops`);
+
+    // Log sample so root cause of any surprises is visible in DevTools
+    for (const [path, op] of diffEntries.slice(0, 5)) {
+      const f = this.app.vault.getAbstractFileByPath(path);
+      const snap = snapData[path];
+      if (f instanceof TFile && snap) {
+        console.log(`[NeoGDSync]   ${op}: ${path} | mtime diff=${f.stat.mtime - snap.mtime}ms | size: ${snap.size}→${f.stat.size}`);
+      } else {
+        console.log(`[NeoGDSync]   ${op}: ${path} | f=${!!f} snap=${!!snap}`);
       }
     }
-    if (count > 0) {
-      console.log(`[NeoGDSync] Startup diff: ${count} offline changes detected`);
+
+    let count = 0;
+    for (const [path, op] of diffEntries) {
+      if (!this.pendingOps[path]) { this.pendingOps[path] = op; count++; }
     }
+    console.log(count > 0
+      ? `[NeoGDSync] Startup diff: ${count} offline changes detected`
+      : '[NeoGDSync] Startup diff: 0 changes — snapshot is current');
+    this.updateStatus();
   }
 
   // ── Sync ───────────────────────────────────────────────────────
@@ -204,12 +214,8 @@ export default class NeoGDSync extends Plugin {
       notice.setMessage(`NeoGDSync: done — ${summary}`);
       setTimeout(() => notice.hide(), 4000);
 
-      if (result.errors.length) {
-        console.error('[NeoGDSync] Errors:', result.errors);
-      }
-      if (result.conflicts.length) {
-        new Notice(`⚠️ ${result.conflicts.length} conflict(s) detected — check NeoGDSync conflicts`, 6000);
-      }
+      if (result.errors.length) console.error('[NeoGDSync] Errors:', result.errors);
+      if (result.conflicts.length) new Notice(`⚠️ ${result.conflicts.length} conflict(s) detected — check NeoGDSync conflicts`, 6000);
     } catch (e: any) {
       notice.setMessage(`NeoGDSync: ERROR — ${e.message}`);
       setTimeout(() => notice.hide(), 5000);
@@ -237,13 +243,8 @@ export default class NeoGDSync extends Plugin {
     }
   }
 
-  showConflicts() {
-    new ConflictModal(this.app, this.conflicts).open();
-  }
-
-  openSyncModal() {
-    new SyncModal(this.app, this).open();
-  }
+  showConflicts() { new ConflictModal(this.app, this.conflicts).open(); }
+  openSyncModal() { new SyncModal(this.app, this).open(); }
 
   // ── Status bar ─────────────────────────────────────────────────
 
@@ -267,16 +268,19 @@ export default class NeoGDSync extends Plugin {
 
   async loadSettings() {
     const saved = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved?.settings ?? {});
+    this.settings   = Object.assign({}, DEFAULT_SETTINGS, saved?.settings ?? {});
     this.pendingOps = saved?.pendingOps ?? {};
     this.conflicts  = saved?.conflicts ?? [];
+    // Inject snapshot (purges .obsidian entries via setRaw)
+    if (this.snapshot) this.snapshot.setRaw(saved?.snapshot);
   }
 
   async saveSettings() {
     await this.saveData({
-      settings: this.settings,
+      settings:   this.settings,
       pendingOps: this.pendingOps,
-      conflicts: this.conflicts,
+      conflicts:  this.conflicts,
+      snapshot:   this.snapshot ? this.snapshot.getAll() : {},
     });
   }
 }
@@ -303,13 +307,10 @@ class SyncModal extends Modal {
     const btnRow = contentEl.createDiv({ cls: 'neogdsync-btn-row' });
     const smartBtn = btnRow.createEl('button', { text: '⚡ Smart Sync' });
     smartBtn.onclick = () => { this.close(); this.plugin.runSync('smart'); };
-
     const pushBtn = btnRow.createEl('button', { text: '↑ Force Push' });
     pushBtn.onclick = () => { this.close(); this.plugin.runSync('push'); };
-
     const pullBtn = btnRow.createEl('button', { text: '↓ Force Pull' });
     pullBtn.onclick = () => { this.close(); this.plugin.runSync('pull'); };
-
     if (this.plugin.conflicts.length > 0) {
       const conflictBtn = btnRow.createEl('button', { text: `⚠️ ${this.plugin.conflicts.length} Conflicts` });
       conflictBtn.onclick = () => { this.close(); this.plugin.showConflicts(); };
@@ -327,17 +328,12 @@ class ConflictModal extends Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl('h2', { text: `Conflicts (${this.conflicts.length})` });
-    if (!this.conflicts.length) {
-      contentEl.createEl('p', { text: 'No conflicts.' });
-      return;
-    }
+    if (!this.conflicts.length) { contentEl.createEl('p', { text: 'No conflicts.' }); return; }
     for (const c of this.conflicts) {
       const div = contentEl.createDiv({ cls: 'neogdsync-conflict' });
       div.createEl('strong', { text: c.localPath });
       div.createEl('br');
-      div.createEl('small', {
-        text: `Local: ${new Date(c.localMtime).toLocaleString()} | Drive: ${new Date(c.driveMtime).toLocaleString()}`,
-      });
+      div.createEl('small', { text: `Local: ${new Date(c.localMtime).toLocaleString()} | Drive: ${new Date(c.driveMtime).toLocaleString()}` });
       div.createEl('br');
       div.createEl('small', { text: `Drive copy saved as: ${c.conflictCopyPath}` });
     }
@@ -359,9 +355,7 @@ class NeoSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Refresh Token')
       .setDesc('Google OAuth2 refresh token (from google-drive-sync plugin)')
-      .addText(t => t
-        .setPlaceholder('1//05o…')
-        .setValue(this.plugin.settings.refreshToken)
+      .addText(t => t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
         .onChange(async v => {
           this.plugin.settings.refreshToken = v.trim();
           this.plugin.drive = new DriveApi(v.trim());
@@ -375,47 +369,31 @@ class NeoSettingsTab extends PluginSettingTab {
       .addText(t => {
         t.inputEl.style.width = '340px';
         t.inputEl.style.fontFamily = 'monospace';
-        t.setPlaceholder('1xGNFQGB…')
-         .setValue(this.plugin.settings.vaultRootId)
-         .onChange(async v => {
-           this.plugin.settings.vaultRootId = v.trim();
-           // Reinitialise index with new root
-           this.plugin.index = new PathIndex(
-             this.plugin.app,
-             this.plugin.drive,
-             v.trim(),
-           );
-           await this.plugin.index.load();
-           await this.plugin.saveSettings();
-         });
+        t.setPlaceholder('1xGNFQGB…').setValue(this.plugin.settings.vaultRootId)
+          .onChange(async v => {
+            this.plugin.settings.vaultRootId = v.trim();
+            this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
+            await this.plugin.index.load();
+            await this.plugin.saveSettings();
+          });
       });
 
     new Setting(containerEl)
-      .setName('Sync Mode')
-      .setDesc('Default sync mode when using ribbon icon')
+      .setName('Sync Mode').setDesc('Default sync mode when using ribbon icon')
       .addDropdown(d => d
         .addOption('smart', 'Smart (conflict detect)')
         .addOption('push', 'Force Push')
         .addOption('pull', 'Force Pull')
         .setValue(this.plugin.settings.syncMode)
-        .onChange(async v => {
-          this.plugin.settings.syncMode = v as any;
-          await this.plugin.saveSettings();
-        }));
+        .onChange(async v => { this.plugin.settings.syncMode = v as any; await this.plugin.saveSettings(); }));
 
     new Setting(containerEl)
-      .setName('Keep Revisions')
-      .setDesc('Keep file revisions on Drive (version history)')
-      .addToggle(t => t
-        .setValue(this.plugin.settings.keepRevisions)
-        .onChange(async v => {
-          this.plugin.settings.keepRevisions = v;
-          await this.plugin.saveSettings();
-        }));
+      .setName('Keep Revisions').setDesc('Keep file revisions on Drive (version history)')
+      .addToggle(t => t.setValue(this.plugin.settings.keepRevisions)
+        .onChange(async v => { this.plugin.settings.keepRevisions = v; await this.plugin.saveSettings(); }));
 
     new Setting(containerEl)
-      .setName('Pending ops')
-      .setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`)
+      .setName('Pending ops').setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`)
       .addButton(b => b.setButtonText('Clear all').onClick(async () => {
         this.plugin.pendingOps = {};
         await this.plugin.saveSettings();
@@ -424,16 +402,12 @@ class NeoSettingsTab extends PluginSettingTab {
       }));
 
     new Setting(containerEl)
-      .setName('Rebuild Drive Index')
-      .setDesc('Crawl Drive vault from root and rebuild local index.db')
+      .setName('Rebuild Drive Index').setDesc('Crawl Drive vault from root and rebuild local index.db')
       .addButton(b => b.setButtonText('Rebuild').onClick(() => this.plugin.rebuildIndex()));
 
     containerEl.createEl('h3', { text: 'Status' });
-    const stats = containerEl.createEl('p');
-    stats.setText(
-      `Last sync: ${this.plugin.settings.lastSyncedAt
-        ? new Date(this.plugin.settings.lastSyncedAt).toLocaleString()
-        : 'never'} | ` +
+    containerEl.createEl('p').setText(
+      `Last sync: ${this.plugin.settings.lastSyncedAt ? new Date(this.plugin.settings.lastSyncedAt).toLocaleString() : 'never'} | ` +
       `Conflicts: ${this.plugin.conflicts.length}`,
     );
   }

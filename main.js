@@ -395,21 +395,24 @@ async function ensureDir(app, path) {
   }
 }
 
-// src/snapshot.ts
+// src/snapshot.ts — snapshot lives in memory, persisted via plugin.saveSettings()
 var import_obsidian2 = require("obsidian");
-var SNAPSHOT_PATH = ".neogdsync/snapshot.json";
 var VaultSnapshot = class {
   constructor(app) {
     this.app = app;
     this.snapshot = {};
   }
-  async load() {
-    try {
-      const raw = await this.app.vault.adapter.read((0, import_obsidian2.normalizePath)(SNAPSHOT_PATH));
-      this.snapshot = JSON.parse(raw);
-    } catch (e) {
-      this.snapshot = {};
+  // Called by plugin.loadSettings() to inject loaded snapshot
+  setRaw(data) {
+    const raw = data || {};
+    // Purge any .obsidian entries that may have been saved in earlier versions
+    for (const key of Object.keys(raw)) {
+      if (key.startsWith(".obsidian")) delete raw[key];
     }
+    this.snapshot = raw;
+  }
+  async load() {
+    // no-op: data is injected via setRaw() from loadSettings()
   }
   async save(exclude) {
     const fresh = {};
@@ -420,14 +423,7 @@ var VaultSnapshot = class {
       }
     }
     this.snapshot = fresh;
-    const snapDir = (0, import_obsidian2.normalizePath)(".neogdsync");
-    if (!(await this.app.vault.adapter.exists(snapDir))) {
-      await this.app.vault.adapter.mkdir(snapDir);
-    }
-    await this.app.vault.adapter.write(
-      (0, import_obsidian2.normalizePath)(SNAPSHOT_PATH),
-      JSON.stringify(fresh)
-    );
+    // Snapshot will be persisted on next saveSettings() call (called by runSync)
   }
   /**
    * Diff current vault against last snapshot.
@@ -443,7 +439,7 @@ var VaultSnapshot = class {
       const snap = this.snapshot[f.path];
       if (!snap) {
         ops[f.path] = "create";
-      } else if (f.stat.mtime > snap.mtime || f.stat.size !== snap.size) {
+      } else if ((f.stat.mtime - snap.mtime > 2000) || f.stat.size !== snap.size) {
         ops[f.path] = "modify";
       }
     }
@@ -752,14 +748,22 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   }
   // ── Lifecycle ──────────────────────────────────────────────────
   async onload() {
+    this.snapshot = new VaultSnapshot(this.app);
     await this.loadSettings();
     this.drive = new DriveApi(this.settings.refreshToken);
     this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
-    this.snapshot = new VaultSnapshot(this.app);
     await this.index.load();
-    await this.snapshot.load();
-    this.mergeOfflineDiff();
-    this.registerEvents();
+    // snapshot already loaded via setRaw() in loadSettings()
+    // Delay BOTH offline diff AND event registration until layout is ready.
+    // Before onLayoutReady, vault.getFiles() returns stale/incorrect stat values
+    // (mtime/size), which causes computeDiff to falsely flag all files as changed.
+    this.app.workspace.onLayoutReady(() => {
+      const filesBefore = this.app.vault.getFiles().length;
+      console.log(`[NeoGDSync] onLayoutReady: vault has ${filesBefore} files`);
+      this.mergeOfflineDiff();
+      this.registerEvents();
+      console.log("[NeoGDSync] Vault events registered (layout ready)");
+    });
     const ribbonIcon = this.addRibbonIcon("cloud", "NeoGDSync", () => this.openSyncModal());
     ribbonIcon.addClass("neogdsync-ribbon");
     this.statusEl = this.addStatusBarItem();
@@ -798,9 +802,11 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     new import_obsidian4.Notice("NeoGDSync loaded \u2713");
   }
   async onunload() {
+    // IMPORTANT: snapshot.save() MUST come before saveSettings()
+    // so the fresh file stats are persisted to data.json
+    await this.snapshot.save((p) => this.exclude(p));
     await this.saveSettings();
     await this.index.save();
-    await this.snapshot.save((p) => this.exclude(p));
   }
   // ── Vault events ───────────────────────────────────────────────
   registerEvents() {
@@ -811,6 +817,7 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   }
   exclude(path) {
     if (path.startsWith(".neogdsync")) return true;
+    if (path.startsWith(".obsidian")) return true;
     if (path.startsWith(".smart-env")) return true;
     if (path.startsWith(".smtcmp")) return true;
     if (path.endsWith(".DS_Store")) return true;
@@ -818,9 +825,10 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   }
   handleCreate(f) {
     if (this.exclude(f.path)) return;
+    if (!(f instanceof import_obsidian4.TFile)) return;  // skip folders
     const cur = this.pendingOps[f.path];
     if (cur === "delete") {
-      this.pendingOps[f.path] = f instanceof import_obsidian4.TFile ? "modify" : "create";
+      this.pendingOps[f.path] = "modify";
     } else if (!cur) {
       this.pendingOps[f.path] = "create";
     }
@@ -829,6 +837,9 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   }
   handleModify(f) {
     if (this.exclude(f.path) || !(f instanceof import_obsidian4.TFile)) return;
+    // Skip if file matches snapshot (Obsidian fires modify events on startup for all files)
+    const snap = this.snapshot.get(f.path);
+    if (snap && Math.abs(f.stat.mtime - snap.mtime) <= 2000 && f.stat.size === snap.size) return;
     if (!this.pendingOps[f.path]) {
       this.pendingOps[f.path] = "modify";
     }
@@ -860,16 +871,32 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.debouncedSave();
   }
   mergeOfflineDiff() {
-    const snapshotEmpty = Object.keys(this.snapshot.getAll ? this.snapshot.getAll() : {}).length === 0;
-    if (snapshotEmpty) {
+    const snapData = this.snapshot.getAll ? this.snapshot.getAll() : {};
+    const snapCount = Object.keys(snapData).length;
+    const vaultCount = this.app.vault.getFiles().length;
+    console.log(`[NeoGDSync] mergeOfflineDiff: snapshot=${snapCount} entries, vault=${vaultCount} files`);
+    if (snapCount === 0) {
       // No snapshot yet — save current vault state as baseline, don't flood pendingOps
       console.log("[NeoGDSync] No snapshot found — saving current vault as baseline, skipping offline diff");
-      this.snapshot.save((p) => this.exclude(p)).catch(console.error);
+      this.snapshot.save((p) => this.exclude(p)).then(() => this.saveSettings()).catch(console.error);
       return;
     }
     const diff = this.snapshot.computeDiff((p) => this.exclude(p));
+    const diffEntries = Object.entries(diff);
+    console.log(`[NeoGDSync] computeDiff returned ${diffEntries.length} ops`);
+    // Log sample of flagged files to understand why they're being flagged
+    const sample = diffEntries.slice(0, 5);
+    for (const [path, op] of sample) {
+      const f = this.app.vault.getAbstractFileByPath(path);
+      const snap = snapData[path];
+      if (f && snap && f.stat) {
+        console.log(`[NeoGDSync]   ${op}: ${path} | disk mtime=${f.stat.mtime} snap mtime=${snap.mtime} diff=${f.stat.mtime - snap.mtime}ms | disk size=${f.stat.size} snap size=${snap.size}`);
+      } else {
+        console.log(`[NeoGDSync]   ${op}: ${path} | f=${!!f} snap=${!!snap}`);
+      }
+    }
     let count = 0;
-    for (const [path, op] of Object.entries(diff)) {
+    for (const [path, op] of diffEntries) {
       if (!this.pendingOps[path]) {
         this.pendingOps[path] = op;
         count++;
@@ -877,6 +904,8 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     }
     if (count > 0) {
       console.log(`[NeoGDSync] Startup diff: ${count} offline changes detected`);
+    } else {
+      console.log("[NeoGDSync] Startup diff: 0 offline changes — snapshot is current");
     }
   }
   // ── Sync ───────────────────────────────────────────────────────
@@ -978,12 +1007,15 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, (_a = saved == null ? void 0 : saved.settings) != null ? _a : {});
     this.pendingOps = (_b = saved == null ? void 0 : saved.pendingOps) != null ? _b : {};
     this.conflicts = (_c = saved == null ? void 0 : saved.conflicts) != null ? _c : [];
+    // Inject snapshot into VaultSnapshot instance
+    if (this.snapshot) this.snapshot.setRaw(saved == null ? void 0 : saved.snapshot);
   }
   async saveSettings() {
     await this.saveData({
       settings: this.settings,
       pendingOps: this.pendingOps,
-      conflicts: this.conflicts
+      conflicts: this.conflicts,
+      snapshot: this.snapshot ? this.snapshot.getAll() : {}
     });
   }
 };
