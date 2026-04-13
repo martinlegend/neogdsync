@@ -62,19 +62,21 @@ export class Syncer {
       }
     }
 
-    // Step 2: fetch Drive changes since last sync
+    // Step 2: fetch Drive changes since last sync (graceful — push-only if offline)
     this.onProgress('Fetching Drive changes…');
-    // If no changesToken yet, get a fresh start page token first
-    if (!this.settings.changesToken) {
-      this.settings.changesToken = await this.drive.getStartPageToken();
+    let changes: any[] = [];
+    let newToken = this.settings.changesToken;
+    try {
+      if (!this.settings.changesToken) {
+        this.settings.changesToken = await this.drive.getStartPageToken();
+      }
+      const result = await this.drive.getChanges(this.settings.changesToken);
+      changes = result.changes;
+      newToken = result.newToken;
+    } catch (fetchErr: any) {
+      console.warn('[NeoGDSync] Could not fetch Drive changes (offline or API error), pushing local changes only:', fetchErr.message);
     }
-    const { changes, newToken } = await this.drive.getChanges(this.settings.changesToken);
     const driveChanged = new Map<string, { removed: boolean; mtime?: string }>();
-    for (const c of changes) {
-      const entry = this.index.get(''); // we need reverse lookup: driveId → path
-      // Build reverse map from index
-    }
-    // Build driveId→path reverse map
     const driveIdToPath = new Map<string, string>();
     for (const p of this.index.allPaths()) {
       const e = this.index.get(p);

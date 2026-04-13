@@ -529,14 +529,18 @@ var Syncer = class {
       }
     }
     this.onProgress("Fetching Drive changes\u2026");
-    if (!this.settings.changesToken) {
-      this.settings.changesToken = await this.drive.getStartPageToken();
+    let changes = [], newToken = this.settings.changesToken;
+    try {
+      if (!this.settings.changesToken) {
+        this.settings.changesToken = await this.drive.getStartPageToken();
+      }
+      const result = await this.drive.getChanges(this.settings.changesToken);
+      changes = result.changes;
+      newToken = result.newToken;
+    } catch (fetchErr) {
+      console.warn("[NeoGDSync] Could not fetch Drive changes (offline or API error), pushing local changes only:", fetchErr.message);
     }
-    const { changes, newToken } = await this.drive.getChanges(this.settings.changesToken);
     const driveChanged = /* @__PURE__ */ new Map();
-    for (const c of changes) {
-      const entry = this.index.get("");
-    }
     const driveIdToPath = /* @__PURE__ */ new Map();
     for (const p of this.index.allPaths()) {
       const e = this.index.get(p);
