@@ -1,13 +1,13 @@
 export interface NeoSettings {
   refreshToken: string;
   vaultRootId: string;
-  authProxyUrl: string;          // OAuth2 proxy endpoint
+  authProxyUrl: string;
   lastSyncedAt: number;
   changesToken: string;
   syncMode: 'smart' | 'push' | 'pull';
   keepRevisions: boolean;
-  excludePaths: string[];        // glob patterns to exclude
-  concurrency: number;           // parallel upload limit
+  excludePaths: string[];
+  concurrency: number;
 }
 
 export const DEFAULT_SETTINGS: NeoSettings = {
@@ -29,27 +29,24 @@ export const DEFAULT_SETTINGS: NeoSettings = {
   concurrency: 6,
 };
 
-// Stored in .neogdsync/index.db — NOT in data.json
 export interface IndexEntry {
   driveId: string;
-  driveMtime: string;   // ISO string from Drive
-  syncedAt: number;     // local Date.now() when synced
+  driveMtime: string;
+  syncedAt: number;
   isFolder: boolean;
 }
 export interface FileIndex {
   [localPath: string]: IndexEntry;
 }
 
-// Stored in .neogdsync/snapshot.json — NOT in data.json
 export interface SnapshotEntry {
-  mtime: number;    // ms
-  size: number;     // bytes
+  mtime: number;
+  size: number;
 }
 export interface Snapshot {
   [localPath: string]: SnapshotEntry;
 }
 
-// In-memory only, cleared after each sync
 export type OpType = 'create' | 'modify' | 'delete';
 export interface PendingOps {
   [localPath: string]: OpType;
@@ -61,6 +58,24 @@ export interface DriveFileInfo {
   mimeType: string;
   modifiedTime: string;
   parents?: string[];
+  size?: string;
+}
+
+// Shape of a single item in the Drive Changes API response
+export interface DriveChange {
+  fileId: string;
+  removed: boolean;
+  file?: {
+    id: string;
+    name: string;
+    mimeType: string;
+    modifiedTime: string;
+  };
+}
+
+export interface DriveRevision {
+  id: string;
+  modifiedTime: string;
   size?: string;
 }
 

@@ -1,8 +1,4 @@
 "use strict";
-function matchGlob(pattern, path) {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\x00").replace(/\*/g, "[^/]*").replace(/\x00/g, ".*").replace(/\?/g, "[^/]");
-  return new RegExp("^" + escaped + "$").test(path);
-}
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -27,12 +23,13 @@ __export(main_exports, {
   default: () => NeoGDSync
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/types.ts
 var DEFAULT_SETTINGS = {
   refreshToken: "",
   vaultRootId: "",
+  authProxyUrl: "https://ogd.richardxiong.com/api/access",
   lastSyncedAt: 0,
   changesToken: "",
   syncMode: "smart",
@@ -48,20 +45,26 @@ var DEFAULT_SETTINGS = {
   concurrency: 6
 };
 
+// src/driveApi.ts
+var import_obsidian2 = require("obsidian");
+
 // src/auth.ts
-var PROXY_URL = "https://ogd.richardxiong.com/api/access";
+var import_obsidian = require("obsidian");
+var DEFAULT_PROXY_URL = "https://ogd.richardxiong.com/api/access";
 var cached = null;
-async function getAccessToken(refreshToken) {
+async function getAccessToken(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
   if (cached && Date.now() < cached.expiresAt - 6e4) {
     return cached.token;
   }
-  const resp = await fetch(PROXY_URL, {
+  const resp = await (0, import_obsidian.requestUrl)({
+    url: proxyUrl,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken })
+    body: JSON.stringify({ refresh_token: refreshToken }),
+    throw: false
   });
-  if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`);
-  const { access_token, expires_in } = await resp.json();
+  if (resp.status >= 400) throw new Error(`Auth failed: ${resp.status}`);
+  const { access_token, expires_in } = resp.json;
   cached = { token: access_token, expiresAt: Date.now() + expires_in * 1e3 };
   return cached.token;
 }
@@ -73,16 +76,18 @@ function clearTokenCache() {
 var BASE = "https://www.googleapis.com/drive/v3";
 var UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 var FOLDER_MIME = "application/vnd.google-apps.folder";
-async function req(method, url, body, headers, refreshToken) {
+async function driveRequest(method, url, body, headers, refreshToken) {
   const token = refreshToken ? await getAccessToken(refreshToken) : "";
-  const resp = await fetch(url, {
+  const resp = await (0, import_obsidian2.requestUrl)({
+    url,
     method,
     headers: { Authorization: `Bearer ${token}`, ...headers },
-    body
+    body,
+    throw: false
   });
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`Drive ${method} ${url} \u2192 ${resp.status}: ${txt.slice(0, 200)}`);
+  if (resp.status >= 400) {
+    const txt = resp.text.slice(0, 200);
+    throw new Error(`Drive ${method} ${url} \u2192 ${resp.status}: ${txt}`);
   }
   return resp;
 }
@@ -90,11 +95,10 @@ var DriveApi = class {
   constructor(refreshToken) {
     this.refreshToken = refreshToken;
   }
-  async fetch(method, url, body, headers) {
-    return req(method, url, body, headers, this.refreshToken);
+  request(method, url, body, headers) {
+    return driveRequest(method, url, body, headers, this.refreshToken);
   }
   // ── Folder operations ──────────────────────────────────────────
-  /** List direct children of a folder */
   async listChildren(folderId) {
     var _a;
     const results = [];
@@ -106,81 +110,73 @@ var DriveApi = class {
         pageSize: "1000"
       });
       if (pageToken) params.set("pageToken", pageToken);
-      const resp = await this.fetch("GET", `${BASE}/files?${params}`);
-      const data = await resp.json();
+      const resp = await this.request("GET", `${BASE}/files?${params}`);
+      const data = resp.json;
       results.push(...(_a = data.files) != null ? _a : []);
       pageToken = data.nextPageToken;
     } while (pageToken);
     return results;
   }
-  /** Create a folder, return its Drive ID */
   async createFolder(name, parentId) {
-    const resp = await this.fetch(
+    const resp = await this.request(
       "POST",
       `${BASE}/files?fields=id`,
       JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }),
       { "Content-Type": "application/json" }
     );
-    const { id } = await resp.json();
+    const { id } = resp.json;
     return id;
   }
   // ── File operations ────────────────────────────────────────────
-  /** Upload a new file (multipart). Returns Drive ID. */
   async uploadFile(name, parentId, content, mimeType, modifiedTime, keepRevision = false) {
     const boundary = "neogdsync_boundary";
     const meta = JSON.stringify({ name, parents: [parentId], modifiedTime });
     const body = buildMultipart(boundary, meta, content, mimeType);
     const params = new URLSearchParams({ uploadType: "multipart", fields: "id" });
     if (keepRevision) params.set("keepRevisionForever", "true");
-    const resp = await this.fetch(
+    const resp = await this.request(
       "POST",
       `${UPLOAD}/files?${params}`,
-      body,
+      body.buffer,
       { "Content-Type": `multipart/related; boundary=${boundary}` }
     );
-    const { id } = await resp.json();
+    const { id } = resp.json;
     return id;
   }
-  /** Update existing file content. Returns Drive ID (unchanged). */
   async updateFile(driveId, content, mimeType, modifiedTime, keepRevision = false) {
     const boundary = "neogdsync_boundary";
     const meta = JSON.stringify({ modifiedTime });
     const body = buildMultipart(boundary, meta, content, mimeType);
     const params = new URLSearchParams({ uploadType: "multipart", fields: "id" });
     if (keepRevision) params.set("keepRevisionForever", "true");
-    const resp = await this.fetch(
+    const resp = await this.request(
       "PATCH",
       `${UPLOAD}/files/${driveId}?${params}`,
-      body,
+      body.buffer,
       { "Content-Type": `multipart/related; boundary=${boundary}` }
     );
-    const { id } = await resp.json();
+    const { id } = resp.json;
     return id;
   }
-  /** Rename a file on Drive */
   async renameFile(driveId, newName) {
-    await this.fetch(
+    await this.request(
       "PATCH",
       `${BASE}/files/${driveId}?fields=id`,
       JSON.stringify({ name: newName }),
       { "Content-Type": "application/json" }
     );
   }
-  /** Delete a file (move to trash) */
   async deleteFile(driveId) {
-    await this.fetch("DELETE", `${BASE}/files/${driveId}`);
+    await this.request("DELETE", `${BASE}/files/${driveId}`);
   }
-  /** Download file content */
   async downloadFile(driveId) {
-    const resp = await this.fetch("GET", `${BASE}/files/${driveId}?alt=media`);
-    return resp.arrayBuffer();
+    const resp = await this.request("GET", `${BASE}/files/${driveId}?alt=media`);
+    return resp.arrayBuffer;
   }
-  /** Get file metadata */
   async getFileMeta(driveId) {
-    const resp = await this.fetch("GET", `${BASE}/files/${driveId}?fields=id,name,mimeType,modifiedTime,parents,size`);
-    return resp.json();
+    const resp = await this.request("GET", `${BASE}/files/${driveId}?fields=id,name,mimeType,modifiedTime,parents,size`);
+    return resp.json;
   }
-  /** Get Drive changes since a token */
   async getChanges(pageToken) {
     var _a, _b;
     const changes = [];
@@ -192,8 +188,8 @@ var DriveApi = class {
         includeRemoved: "true",
         fields: "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime))"
       });
-      const resp = await this.fetch("GET", `${BASE}/changes?${params}`);
-      const data = await resp.json();
+      const resp = await this.request("GET", `${BASE}/changes?${params}`);
+      const data = resp.json;
       changes.push(...(_a = data.changes) != null ? _a : []);
       token = (_b = data.nextPageToken) != null ? _b : "";
       if (data.newStartPageToken) {
@@ -202,17 +198,15 @@ var DriveApi = class {
     }
     return { changes, newToken: pageToken };
   }
-  /** Get a fresh start page token */
   async getStartPageToken() {
-    const resp = await this.fetch("GET", `${BASE}/changes/startPageToken`);
-    const { startPageToken } = await resp.json();
+    const resp = await this.request("GET", `${BASE}/changes/startPageToken`);
+    const { startPageToken } = resp.json;
     return startPageToken;
   }
-  /** List revisions of a file */
   async listRevisions(driveId) {
     var _a;
-    const resp = await this.fetch("GET", `${BASE}/files/${driveId}/revisions?fields=revisions(id,modifiedTime,size)`);
-    const data = await resp.json();
+    const resp = await this.request("GET", `${BASE}/files/${driveId}/revisions?fields=revisions(id,modifiedTime,size)`);
+    const data = resp.json;
     return (_a = data.revisions) != null ? _a : [];
   }
 };
@@ -238,7 +232,7 @@ Content-Type: ${mime}\r
 }
 
 // src/pathIndex.ts
-var import_obsidian = require("obsidian");
+var import_obsidian3 = require("obsidian");
 var INDEX_PATH = ".neogdsync/index.db";
 var FOLDER_MIME2 = "application/vnd.google-apps.folder";
 var PathIndex = class {
@@ -252,7 +246,7 @@ var PathIndex = class {
   // ── Persistence ────────────────────────────────────────────────
   async load() {
     try {
-      const raw = await this.app.vault.adapter.read((0, import_obsidian.normalizePath)(INDEX_PATH));
+      const raw = await this.app.vault.adapter.read((0, import_obsidian3.normalizePath)(INDEX_PATH));
       this.index = JSON.parse(raw);
     } catch (e) {
       this.index = {};
@@ -261,7 +255,7 @@ var PathIndex = class {
   async save() {
     if (!this.dirty) return;
     await ensureDir(this.app, ".neogdsync");
-    await this.app.vault.adapter.write((0, import_obsidian.normalizePath)(INDEX_PATH), JSON.stringify(this.index, null, 2));
+    await this.app.vault.adapter.write((0, import_obsidian3.normalizePath)(INDEX_PATH), JSON.stringify(this.index, null, 2));
     this.dirty = false;
   }
   // ── Core lookups ───────────────────────────────────────────────
@@ -389,32 +383,35 @@ var PathIndex = class {
   }
 };
 async function ensureDir(app, path) {
-  const norm = (0, import_obsidian.normalizePath)(path);
-  if (!(await app.vault.adapter.exists(norm))) {
+  const norm = (0, import_obsidian3.normalizePath)(path);
+  if (!await app.vault.adapter.exists(norm)) {
     await app.vault.adapter.mkdir(norm);
   }
 }
 
-// src/snapshot.ts — snapshot lives in memory, persisted via plugin.saveSettings()
-var import_obsidian2 = require("obsidian");
+// src/snapshot.ts
 var VaultSnapshot = class {
   constructor(app) {
     this.app = app;
     this.snapshot = {};
   }
-  // Called by plugin.loadSettings() to inject loaded snapshot
+  /** Injected by plugin.loadSettings() — purges config dir entries defensively. */
   setRaw(data) {
     const raw = data || {};
-    // Purge any .obsidian entries that may have been saved in earlier versions
+    const configDir = this.app.vault.configDir;
     for (const key of Object.keys(raw)) {
-      if (key.startsWith(".obsidian")) delete raw[key];
+      if (key.startsWith(configDir)) delete raw[key];
     }
     this.snapshot = raw;
   }
-  async load() {
-    // no-op: data is injected via setRaw() from loadSettings()
+  /** No-op: data is injected via setRaw() from loadSettings(). */
+  load() {
   }
-  async save(exclude) {
+  /**
+   * Rebuild snapshot from current vault state.
+   * Updates in-memory snapshot only; caller must call saveSettings() to persist.
+   */
+  save(exclude) {
     const fresh = {};
     const files = this.app.vault.getFiles();
     for (const f of files) {
@@ -423,11 +420,11 @@ var VaultSnapshot = class {
       }
     }
     this.snapshot = fresh;
-    // Snapshot will be persisted on next saveSettings() call (called by runSync)
   }
   /**
    * Diff current vault against last snapshot.
    * Returns ops that happened while plugin was offline.
+   * Must be called after onLayoutReady so vault.getFiles() returns accurate stats.
    */
   computeDiff(exclude) {
     const ops = {};
@@ -439,7 +436,7 @@ var VaultSnapshot = class {
       const snap = this.snapshot[f.path];
       if (!snap) {
         ops[f.path] = "create";
-      } else if ((f.stat.mtime - snap.mtime > 2000) || f.stat.size !== snap.size) {
+      } else if (f.stat.mtime - snap.mtime > 2e3 || f.stat.size !== snap.size) {
         ops[f.path] = "modify";
       }
     }
@@ -459,7 +456,7 @@ var VaultSnapshot = class {
 };
 
 // src/syncer.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/mime.ts
 var MAP = {
@@ -523,21 +520,23 @@ var Syncer = class {
     this.onProgress("Scanning local changes\u2026");
     const offlineDiff = this.snapshot.computeDiff((p) => this.exclude(p));
     for (const [path, op] of Object.entries(offlineDiff)) {
-      if (!this.pendingOps[path]) {
-        this.pendingOps[path] = op;
-      }
+      if (!this.pendingOps[path]) this.pendingOps[path] = op;
     }
     this.onProgress("Fetching Drive changes\u2026");
-    let changes = [], newToken = this.settings.changesToken;
+    let changes = [];
+    let newToken = this.settings.changesToken;
     try {
       if (!this.settings.changesToken) {
         this.settings.changesToken = await this.drive.getStartPageToken();
       }
-      const result = await this.drive.getChanges(this.settings.changesToken);
-      changes = result.changes;
-      newToken = result.newToken;
-    } catch (fetchErr) {
-      console.warn("[NeoGDSync] Could not fetch Drive changes (offline or API error), pushing local changes only:", fetchErr.message);
+      const r = await this.drive.getChanges(this.settings.changesToken);
+      changes = r.changes;
+      newToken = r.newToken;
+    } catch (err) {
+      console.warn(
+        "[NeoGDSync] Could not fetch Drive changes, pushing local changes only:",
+        err instanceof Error ? err.message : String(err)
+      );
     }
     const driveChanged = /* @__PURE__ */ new Map();
     const driveIdToPath = /* @__PURE__ */ new Map();
@@ -548,10 +547,7 @@ var Syncer = class {
     for (const c of changes) {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
-        driveChanged.set(localPath, {
-          removed: c.removed,
-          mtime: (_a = c.file) == null ? void 0 : _a.modifiedTime
-        });
+        driveChanged.set(localPath, { removed: c.removed, mtime: (_a = c.file) == null ? void 0 : _a.modifiedTime });
       }
     }
     const allOps = Object.entries(this.pendingOps);
@@ -572,17 +568,15 @@ var Syncer = class {
             await this.handlePush(path, op, result);
           }
         }
-      } catch (e) {
-        result.errors.push({ path, error: e.message });
+      } catch (err) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
     await this.pullNewFromDrive(driveChanged, result);
     this.settings.changesToken = newToken;
     this.settings.lastSyncedAt = Date.now();
-    await this.snapshot.save((p) => this.exclude(p));
+    this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    // Clear pushed, deleted, AND pulled — pulled files trigger handleModify via
-    // vault.modifyBinary() which re-adds them to pendingOps; clear all after sync.
     for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
       delete this.pendingOps[p];
     }
@@ -591,8 +585,7 @@ var Syncer = class {
   // ── Force Push ─────────────────────────────────────────────────
   async forcePush() {
     const result = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    const ops = this.pendingOps;
-    const allOps = Object.entries(ops);
+    const allOps = Object.entries(this.pendingOps);
     let done = 0;
     for (const [path, op] of allOps) {
       this.onProgress(`[${++done}/${allOps.length}] push: ${path}`);
@@ -600,15 +593,15 @@ var Syncer = class {
       try {
         if (op === "delete") await this.handleDelete(path, result);
         else await this.handlePush(path, op, result);
-      } catch (e) {
-        result.errors.push({ path, error: e.message });
+      } catch (err) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
     this.settings.lastSyncedAt = Date.now();
     if (!this.settings.changesToken) {
       this.settings.changesToken = await this.drive.getStartPageToken();
     }
-    await this.snapshot.save((p) => this.exclude(p));
+    this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
     for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
       delete this.pendingOps[p];
@@ -630,14 +623,13 @@ var Syncer = class {
         const bytes = await this.drive.downloadFile(entry.driveId);
         await writeLocal(this.app, path, bytes);
         result.pulled.push(path);
-      } catch (e) {
-        result.errors.push({ path, error: e.message });
+      } catch (err) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
     this.settings.lastSyncedAt = Date.now();
-    await this.snapshot.save((p) => this.exclude(p));
+    this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    // Clear pulled files — writeLocal fires vault modify events which re-add them
     for (const p of [...result.pulled, ...result.deleted]) {
       delete this.pendingOps[p];
     }
@@ -645,14 +637,13 @@ var Syncer = class {
   }
   // ── Internal helpers ───────────────────────────────────────────
   async handlePush(path, op, result) {
-    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian3.normalizePath)(path));
-    if (!file || !(file instanceof import_obsidian3.TFile)) return;
+    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
+    if (!file || !(file instanceof import_obsidian4.TFile)) return;
     const bytes = await this.app.vault.readBinary(file);
     const mtime = new Date(file.stat.mtime).toISOString();
     const mimeType = fromPath(path);
     const cached2 = this.index.get(path);
     if (cached2 && !cached2.isFolder) {
-      // File exists in Drive index → update in place, never create duplicate
       await this.drive.updateFile(cached2.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached2, driveMtime: mtime, syncedAt: Date.now() });
     } else {
@@ -688,15 +679,9 @@ var Syncer = class {
     const base = ext ? path.slice(0, -ext.length) : path;
     const conflictPath = `${base}.conflict${ext}`;
     await writeLocal(this.app, conflictPath, bytes);
-    const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian3.normalizePath)(path));
-    const localMtime = localFile instanceof import_obsidian3.TFile ? localFile.stat.mtime : 0;
-    result.conflicts.push({
-      localPath: path,
-      localMtime,
-      driveMtime,
-      conflictCopyPath: conflictPath,
-      detectedAt: Date.now()
-    });
+    const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
+    const localMtime = localFile instanceof import_obsidian4.TFile ? localFile.stat.mtime : 0;
+    result.conflicts.push({ localPath: path, localMtime, driveMtime, conflictCopyPath: conflictPath, detectedAt: Date.now() });
     await this.handlePush(path, "modify", result);
   }
   async pullNewFromDrive(driveChanged, result) {
@@ -704,7 +689,7 @@ var Syncer = class {
       if (this.exclude(path)) continue;
       if (this.pendingOps[path]) continue;
       if (change.removed) {
-        const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian3.normalizePath)(path));
+        const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
         if (localFile) {
           await this.app.vault.trash(localFile, true);
           this.index.delete(path);
@@ -721,31 +706,35 @@ var Syncer = class {
           this.index.set(path, { ...entry, driveMtime: change.mtime, syncedAt: Date.now() });
         }
         result.pulled.push(path);
-      } catch (e) {
-        result.errors.push({ path, error: e.message });
+      } catch (err) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
   }
 };
 async function writeLocal(app, path, bytes) {
-  const norm = (0, import_obsidian3.normalizePath)(path);
+  const norm = (0, import_obsidian4.normalizePath)(path);
   const parts = path.split("/");
   if (parts.length > 1) {
-    const dir = (0, import_obsidian3.normalizePath)(parts.slice(0, -1).join("/"));
+    const dir = (0, import_obsidian4.normalizePath)(parts.slice(0, -1).join("/"));
     if (!await app.vault.adapter.exists(dir)) {
       await app.vault.adapter.mkdir(dir);
     }
   }
   const existing = app.vault.getAbstractFileByPath(norm);
-  if (existing instanceof import_obsidian3.TFile) {
+  if (existing instanceof import_obsidian4.TFile) {
     await app.vault.modifyBinary(existing, bytes);
   } else {
     await app.vault.createBinary(norm, bytes);
   }
 }
+function matchGlob(pattern, path) {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\x00/g, ".*").replace(/\?/g, "[^/]");
+  return new RegExp("^" + escaped + "$").test(path);
+}
 
 // src/main.ts
-var NeoGDSync = class extends import_obsidian4.Plugin {
+var NeoGDSync = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.pendingOps = {};
@@ -759,58 +748,29 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.drive = new DriveApi(this.settings.refreshToken);
     this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
     await this.index.load();
-    // snapshot already loaded via setRaw() in loadSettings()
-    // Delay BOTH offline diff AND event registration until layout is ready.
-    // Before onLayoutReady, vault.getFiles() returns stale/incorrect stat values
-    // (mtime/size), which causes computeDiff to falsely flag all files as changed.
     this.app.workspace.onLayoutReady(() => {
-      const filesBefore = this.app.vault.getFiles().length;
-      console.log(`[NeoGDSync] onLayoutReady: vault has ${filesBefore} files`);
+      console.debug(`[NeoGDSync] onLayoutReady: vault has ${this.app.vault.getFiles().length} files`);
       this.mergeOfflineDiff();
       this.registerEvents();
-      console.log("[NeoGDSync] Vault events registered (layout ready)");
     });
     const ribbonIcon = this.addRibbonIcon("cloud", "NeoGDSync", () => this.openSyncModal());
     ribbonIcon.addClass("neogdsync-ribbon");
     this.statusEl = this.addStatusBarItem();
     this.updateStatus();
-    this.addCommand({
-      id: "smart-sync",
-      name: "Smart Sync (auto conflict detect)",
-      callback: () => this.runSync("smart")
-    });
-    this.addCommand({
-      id: "force-push",
-      name: "Force Push (local \u2192 Drive)",
-      callback: () => this.runSync("push")
-    });
-    this.addCommand({
-      id: "force-pull",
-      name: "Force Pull (Drive \u2192 local)",
-      callback: () => this.runSync("pull")
-    });
-    this.addCommand({
-      id: "rebuild-index",
-      name: "Rebuild Drive index",
-      callback: () => this.rebuildIndex()
-    });
-    this.addCommand({
-      id: "show-conflicts",
-      name: "Show conflicts",
-      callback: () => this.showConflicts()
-    });
+    this.addCommand({ id: "smart-sync", name: "Smart sync (auto conflict detect)", callback: () => this.runSync("smart") });
+    this.addCommand({ id: "force-push", name: "Force push (local \u2192 Drive)", callback: () => this.runSync("push") });
+    this.addCommand({ id: "force-pull", name: "Force pull (Drive \u2192 local)", callback: () => this.runSync("pull") });
+    this.addCommand({ id: "rebuild-index", name: "Rebuild Drive index", callback: () => this.rebuildIndex() });
+    this.addCommand({ id: "show-conflicts", name: "Show conflicts", callback: () => this.showConflicts() });
     this.addSettingTab(new NeoSettingsTab(this.app, this));
-    // ── URI handler: obsidian://neogdsync?mode=smart|push|pull
     this.registerObsidianProtocolHandler("neogdsync", (params) => {
       const mode = params.mode === "push" ? "push" : params.mode === "pull" ? "pull" : "smart";
-      this.runSync(mode);
+      void this.runSync(mode);
     });
-    new import_obsidian4.Notice("NeoGDSync loaded \u2713");
+    new import_obsidian5.Notice("NeoGDSync loaded \u2713");
   }
   async onunload() {
-    // IMPORTANT: snapshot.save() MUST come before saveSettings()
-    // so the fresh file stats are persisted to data.json
-    await this.snapshot.save((p) => this.exclude(p));
+    this.snapshot.save((p) => this.exclude(p));
     await this.saveSettings();
     await this.index.save();
   }
@@ -823,16 +783,16 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   }
   exclude(path) {
     if (path.startsWith(".neogdsync")) return true;
-    if (path.startsWith(".obsidian")) return true;
+    if (path.startsWith(this.app.vault.configDir)) return true;
     if (path.startsWith(".smart-env")) return true;
     if (path.startsWith(".smtcmp")) return true;
     if (path.endsWith(".DS_Store")) return true;
     return false;
   }
   handleCreate(f) {
-    if (this.syncing) return; // sync itself calls writeLocal which fires create events
+    if (this.syncing) return;
     if (this.exclude(f.path)) return;
-    if (!(f instanceof import_obsidian4.TFile)) return;  // skip folders
+    if (!(f instanceof import_obsidian5.TFile)) return;
     const cur = this.pendingOps[f.path];
     if (cur === "delete") {
       this.pendingOps[f.path] = "modify";
@@ -843,11 +803,10 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.debouncedSave();
   }
   handleModify(f) {
-    if (this.syncing) return; // sync itself calls writeLocal/modifyBinary which fires modify events
-    if (this.exclude(f.path) || !(f instanceof import_obsidian4.TFile)) return;
-    // Skip if file matches snapshot (Obsidian fires modify events on startup for all files)
+    if (this.syncing) return;
+    if (this.exclude(f.path) || !(f instanceof import_obsidian5.TFile)) return;
     const snap = this.snapshot.get(f.path);
-    if (snap && Math.abs(f.stat.mtime - snap.mtime) <= 2000 && f.stat.size === snap.size) return;
+    if (snap && Math.abs(f.stat.mtime - snap.mtime) <= 2e3 && f.stat.size === snap.size) return;
     if (!this.pendingOps[f.path]) {
       this.pendingOps[f.path] = "modify";
     }
@@ -879,28 +838,25 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.debouncedSave();
   }
   mergeOfflineDiff() {
-    const snapData = this.snapshot.getAll ? this.snapshot.getAll() : {};
+    const snapData = this.snapshot.getAll();
     const snapCount = Object.keys(snapData).length;
-    const vaultCount = this.app.vault.getFiles().length;
-    console.log(`[NeoGDSync] mergeOfflineDiff: snapshot=${snapCount} entries, vault=${vaultCount} files`);
+    console.debug(`[NeoGDSync] mergeOfflineDiff: snapshot=${snapCount}, vault=${this.app.vault.getFiles().length}`);
     if (snapCount === 0) {
-      // No snapshot yet — save current vault state as baseline, don't flood pendingOps
-      console.log("[NeoGDSync] No snapshot found — saving current vault as baseline, skipping offline diff");
-      this.snapshot.save((p) => this.exclude(p)).then(() => this.saveSettings()).catch(console.error);
+      console.debug("[NeoGDSync] No snapshot \u2014 saving current vault as baseline");
+      this.snapshot.save((p) => this.exclude(p));
+      void this.saveSettings();
       return;
     }
     const diff = this.snapshot.computeDiff((p) => this.exclude(p));
     const diffEntries = Object.entries(diff);
-    console.log(`[NeoGDSync] computeDiff returned ${diffEntries.length} ops`);
-    // Log sample of flagged files to understand why they're being flagged
-    const sample = diffEntries.slice(0, 5);
-    for (const [path, op] of sample) {
+    console.debug(`[NeoGDSync] computeDiff: ${diffEntries.length} ops`);
+    for (const [path, op] of diffEntries.slice(0, 5)) {
       const f = this.app.vault.getAbstractFileByPath(path);
       const snap = snapData[path];
-      if (f && snap && f.stat) {
-        console.log(`[NeoGDSync]   ${op}: ${path} | disk mtime=${f.stat.mtime} snap mtime=${snap.mtime} diff=${f.stat.mtime - snap.mtime}ms | disk size=${f.stat.size} snap size=${snap.size}`);
+      if (f instanceof import_obsidian5.TFile && snap) {
+        console.debug(`[NeoGDSync]   ${op}: ${path} mtime diff=${f.stat.mtime - snap.mtime}ms size: ${snap.size}\u2192${f.stat.size}`);
       } else {
-        console.log(`[NeoGDSync]   ${op}: ${path} | f=${!!f} snap=${!!snap}`);
+        console.debug(`[NeoGDSync]   ${op}: ${path} f=${!!f} snap=${!!snap}`);
       }
     }
     let count = 0;
@@ -910,25 +866,22 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
         count++;
       }
     }
-    if (count > 0) {
-      console.log(`[NeoGDSync] Startup diff: ${count} offline changes detected`);
-    } else {
-      console.log("[NeoGDSync] Startup diff: 0 offline changes — snapshot is current");
-    }
+    console.debug(count > 0 ? `[NeoGDSync] Startup diff: ${count} offline changes` : "[NeoGDSync] Startup diff: 0 changes \u2014 snapshot is current");
+    this.updateStatus();
   }
   // ── Sync ───────────────────────────────────────────────────────
   async runSync(mode) {
     if (this.syncing) {
-      new import_obsidian4.Notice("Sync already in progress");
+      new import_obsidian5.Notice("Sync already in progress");
       return;
     }
     if (!this.settings.refreshToken) {
-      new import_obsidian4.Notice("NeoGDSync: no refresh token configured");
+      new import_obsidian5.Notice("NeoGDSync: no refresh token configured");
       return;
     }
     this.syncing = true;
     this.updateStatus("Syncing\u2026");
-    const notice = new import_obsidian4.Notice(`NeoGDSync: ${mode} sync started\u2026`, 0);
+    const notice = new import_obsidian5.Notice(`NeoGDSync: ${mode} sync started\u2026`, 0);
     try {
       const syncer = new Syncer(
         this.app,
@@ -952,46 +905,39 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
       const summary = `\u2191${result.pushed.length} \u2193${result.pulled.length} \u{1F5D1}${result.deleted.length}` + (result.conflicts.length ? ` \u26A0\uFE0F${result.conflicts.length} conflicts` : "") + (result.errors.length ? ` \u274C${result.errors.length} errors` : "");
       notice.setMessage(`NeoGDSync: done \u2014 ${summary}`);
       setTimeout(() => notice.hide(), 4e3);
-      if (result.errors.length) {
-        console.error("[NeoGDSync] Errors:", result.errors);
-      }
-      if (result.conflicts.length) {
-        new import_obsidian4.Notice(`\u26A0\uFE0F ${result.conflicts.length} conflict(s) detected \u2014 check NeoGDSync conflicts`, 6e3);
-      }
-    } catch (e) {
-      notice.setMessage(`NeoGDSync: ERROR \u2014 ${e.message}`);
+      if (result.errors.length) console.error("[NeoGDSync] Errors:", result.errors);
+      if (result.conflicts.length) new import_obsidian5.Notice(`\u26A0\uFE0F ${result.conflicts.length} conflict(s) detected \u2014 check NeoGDSync conflicts`, 6e3);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      notice.setMessage(`NeoGDSync: ERROR \u2014 ${msg}`);
       setTimeout(() => notice.hide(), 5e3);
-      console.error("[NeoGDSync]", e);
+      console.error("[NeoGDSync]", err);
       this.syncing = false;
       this.updateStatus();
-    } finally {
-      // Keep syncing=true for 600ms so vault events fired by writeLocal/modifyBinary
-      // (which fire asynchronously after the awaits complete) are still suppressed by
-      // handleModify/handleCreate. Then re-save snapshot with fresh TFile stats.
-      setTimeout(() => {
-        this.snapshot.save((p) => this.exclude(p))
-          .then(() => this.saveSettings())
-          .catch(console.error)
-          .finally(() => {
-            this.syncing = false;
-            this.updateStatus();
-          });
-      }, 600);
+      return;
     }
+    setTimeout(() => {
+      this.snapshot.save((p) => this.exclude(p));
+      void this.saveSettings().finally(() => {
+        this.syncing = false;
+        this.updateStatus();
+      });
+    }, 600);
   }
   async rebuildIndex() {
     if (this.syncing) {
-      new import_obsidian4.Notice("Sync in progress");
+      new import_obsidian5.Notice("Sync in progress");
       return;
     }
     this.syncing = true;
-    const notice = new import_obsidian4.Notice("NeoGDSync: rebuilding Drive index\u2026", 0);
+    const notice = new import_obsidian5.Notice("NeoGDSync: rebuilding Drive index\u2026", 0);
     try {
       await this.index.rebuild((msg) => notice.setMessage(`NeoGDSync: ${msg}`));
       notice.setMessage("NeoGDSync: index rebuilt \u2713");
       setTimeout(() => notice.hide(), 3e3);
-    } catch (e) {
-      notice.setMessage(`NeoGDSync: rebuild failed \u2014 ${e.message}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      notice.setMessage(`NeoGDSync: rebuild failed \u2014 ${msg}`);
       setTimeout(() => notice.hide(), 5e3);
     } finally {
       this.syncing = false;
@@ -1019,7 +965,9 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
   }
   debouncedSave() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.saveSettings(), 500);
+    this.saveTimer = setTimeout(() => {
+      void this.saveSettings();
+    }, 500);
   }
   async loadSettings() {
     var _a, _b, _c;
@@ -1027,7 +975,6 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, (_a = saved == null ? void 0 : saved.settings) != null ? _a : {});
     this.pendingOps = (_b = saved == null ? void 0 : saved.pendingOps) != null ? _b : {};
     this.conflicts = (_c = saved == null ? void 0 : saved.conflicts) != null ? _c : [];
-    // Inject snapshot into VaultSnapshot instance
     if (this.snapshot) this.snapshot.setRaw(saved == null ? void 0 : saved.snapshot);
   }
   async saveSettings() {
@@ -1039,7 +986,7 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     });
   }
 };
-var SyncModal = class extends import_obsidian4.Modal {
+var SyncModal = class extends import_obsidian5.Modal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -1057,24 +1004,20 @@ var SyncModal = class extends import_obsidian4.Modal {
       if (pending > 20) ul.createEl("li", { text: `\u2026 and ${pending - 20} more` });
     }
     const btnRow = contentEl.createDiv({ cls: "neogdsync-btn-row" });
-    const smartBtn = btnRow.createEl("button", { text: "\u26A1 Smart Sync" });
-    smartBtn.onclick = () => {
+    btnRow.createEl("button", { text: "\u26A1 Smart sync" }).onclick = () => {
       this.close();
-      this.plugin.runSync("smart");
+      void this.plugin.runSync("smart");
     };
-    const pushBtn = btnRow.createEl("button", { text: "\u2191 Force Push" });
-    pushBtn.onclick = () => {
+    btnRow.createEl("button", { text: "\u2191 Force push" }).onclick = () => {
       this.close();
-      this.plugin.runSync("push");
+      void this.plugin.runSync("push");
     };
-    const pullBtn = btnRow.createEl("button", { text: "\u2193 Force Pull" });
-    pullBtn.onclick = () => {
+    btnRow.createEl("button", { text: "\u2193 Force pull" }).onclick = () => {
       this.close();
-      this.plugin.runSync("pull");
+      void this.plugin.runSync("pull");
     };
     if (this.plugin.conflicts.length > 0) {
-      const conflictBtn = btnRow.createEl("button", { text: `\u26A0\uFE0F ${this.plugin.conflicts.length} Conflicts` });
-      conflictBtn.onclick = () => {
+      btnRow.createEl("button", { text: `\u26A0\uFE0F ${this.plugin.conflicts.length} Conflicts` }).onclick = () => {
         this.close();
         this.plugin.showConflicts();
       };
@@ -1084,14 +1027,14 @@ var SyncModal = class extends import_obsidian4.Modal {
     this.contentEl.empty();
   }
 };
-var ConflictModal = class extends import_obsidian4.Modal {
+var ConflictModal = class extends import_obsidian5.Modal {
   constructor(app, conflicts) {
     super(app);
     this.conflicts = conflicts;
   }
   onOpen() {
     const { contentEl } = this;
-    contentEl.createEl("h2", { text: `Conflicts (${this.conflicts.length})` });
+    contentEl.createEl("h2", { text: "Conflicts" });
     if (!this.conflicts.length) {
       contentEl.createEl("p", { text: "No conflicts." });
       return;
@@ -1100,9 +1043,7 @@ var ConflictModal = class extends import_obsidian4.Modal {
       const div = contentEl.createDiv({ cls: "neogdsync-conflict" });
       div.createEl("strong", { text: c.localPath });
       div.createEl("br");
-      div.createEl("small", {
-        text: `Local: ${new Date(c.localMtime).toLocaleString()} | Drive: ${new Date(c.driveMtime).toLocaleString()}`
-      });
+      div.createEl("small", { text: `Local: ${new Date(c.localMtime).toLocaleString()} | Drive: ${new Date(c.driveMtime).toLocaleString()}` });
       div.createEl("br");
       div.createEl("small", { text: `Drive copy saved as: ${c.conflictCopyPath}` });
     }
@@ -1111,7 +1052,7 @@ var ConflictModal = class extends import_obsidian4.Modal {
     this.contentEl.empty();
   }
 };
-var NeoSettingsTab = class extends import_obsidian4.PluginSettingTab {
+var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -1119,17 +1060,15 @@ var NeoSettingsTab = class extends import_obsidian4.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "NeoGDSync Settings" });
-    new import_obsidian4.Setting(containerEl).setName("Refresh Token").setDesc("Google OAuth2 refresh token (from google-drive-sync plugin)").addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
+    new import_obsidian5.Setting(containerEl).setName("NeoGDSync").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc("Google OAuth2 refresh token").addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
       this.plugin.settings.refreshToken = v.trim();
       this.plugin.drive = new DriveApi(v.trim());
       clearTokenCache();
       await this.plugin.saveSettings();
     }));
-    const vaultRootSetting = new import_obsidian4.Setting(containerEl).setName("Vault Root Folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.");
-    vaultRootSetting.addText((t) => {
-      t.inputEl.style.width = "340px";
-      t.inputEl.style.fontFamily = "monospace";
+    new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
+      t.inputEl.addClass("neogdsync-monospace-input");
       t.setPlaceholder("1xGNFQGB\u2026").setValue(this.plugin.settings.vaultRootId).onChange(async (v) => {
         this.plugin.settings.vaultRootId = v.trim();
         this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
@@ -1137,25 +1076,24 @@ var NeoSettingsTab = class extends import_obsidian4.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    new import_obsidian4.Setting(containerEl).setName("Sync Mode").setDesc("Default sync mode when using ribbon icon").addDropdown((d) => d.addOption("smart", "Smart (conflict detect)").addOption("push", "Force Push").addOption("pull", "Force Pull").setValue(this.plugin.settings.syncMode).onChange(async (v) => {
+    new import_obsidian5.Setting(containerEl).setName("Sync mode").setDesc("Default sync mode when using ribbon icon").addDropdown((d) => d.addOption("smart", "Smart (conflict detect)").addOption("push", "Force push").addOption("pull", "Force pull").setValue(this.plugin.settings.syncMode).onChange(async (v) => {
       this.plugin.settings.syncMode = v;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Keep Revisions").setDesc("Keep file revisions on Drive (version history)").addToggle((t) => t.setValue(this.plugin.settings.keepRevisions).onChange(async (v) => {
+    new import_obsidian5.Setting(containerEl).setName("Keep revisions").setDesc("Keep file revisions on Drive (version history)").addToggle((t) => t.setValue(this.plugin.settings.keepRevisions).onChange(async (v) => {
       this.plugin.settings.keepRevisions = v;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Pending ops").setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`).addButton((b) => b.setButtonText("Clear all").onClick(async () => {
+    new import_obsidian5.Setting(containerEl).setName("Pending ops").setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`).addButton((b) => b.setButtonText("Clear all").onClick(async () => {
       this.plugin.pendingOps = {};
       await this.plugin.saveSettings();
       this.plugin.updateStatus();
       this.display();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Rebuild Drive Index").setDesc("Crawl Drive vault from root and rebuild local index.db").addButton((b) => b.setButtonText("Rebuild").onClick(() => this.plugin.rebuildIndex()));
-    containerEl.createEl("h3", { text: "Status" });
-    const stats = containerEl.createEl("p");
-    stats.setText(
-      `Last sync: ${this.plugin.settings.lastSyncedAt ? new Date(this.plugin.settings.lastSyncedAt).toLocaleString() : "never"} | Conflicts: ${this.plugin.conflicts.length}`
-    );
+    new import_obsidian5.Setting(containerEl).setName("Rebuild Drive index").setDesc("Crawl Drive vault from root and rebuild local index").addButton((b) => b.setButtonText("Rebuild").onClick(() => {
+      void this.plugin.rebuildIndex();
+    }));
+    new import_obsidian5.Setting(containerEl).setName("Status").setHeading();
+    new import_obsidian5.Setting(containerEl).setName(`Last sync: ${this.plugin.settings.lastSyncedAt ? new Date(this.plugin.settings.lastSyncedAt).toLocaleString() : "never"}`).setDesc(`Conflicts: ${this.plugin.conflicts.length}`);
   }
 };

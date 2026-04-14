@@ -5,11 +5,11 @@
  *
  * Key design decisions:
  * - load() is a no-op; data is injected via setRaw() from loadSettings()
- * - save() updates in-memory state; caller must saveSettings() to persist
- * - setRaw() purges .obsidian entries (they're not in vault.getFiles())
+ * - save() updates in-memory state only; caller must saveSettings() to persist
+ * - setRaw() purges configDir entries (they're not in vault.getFiles())
  */
 
-import { App, TFile } from 'obsidian';
+import { App } from 'obsidian';
 import { Snapshot, PendingOps } from './types';
 
 export class VaultSnapshot {
@@ -17,24 +17,24 @@ export class VaultSnapshot {
 
   constructor(private app: App) {}
 
-  /** Injected by plugin.loadSettings() — purges .obsidian entries defensively. */
+  /** Injected by plugin.loadSettings() — purges config dir entries defensively. */
   setRaw(data: Snapshot | undefined): void {
     const raw = data || {};
-    // Purge any .obsidian entries that may have been saved in earlier versions
+    const configDir = this.app.vault.configDir;
     for (const key of Object.keys(raw)) {
-      if (key.startsWith('.obsidian')) delete (raw as Record<string, unknown>)[key];
+      if (key.startsWith(configDir)) delete (raw as Record<string, unknown>)[key];
     }
     this.snapshot = raw;
   }
 
   /** No-op: data is injected via setRaw() from loadSettings(). */
-  async load(): Promise<void> {}
+  load(): void {}
 
   /**
    * Rebuild snapshot from current vault state.
    * Updates in-memory snapshot only; caller must call saveSettings() to persist.
    */
-  async save(exclude: (path: string) => boolean): Promise<void> {
+  save(exclude: (path: string) => boolean): void {
     const fresh: Snapshot = {};
     const files = this.app.vault.getFiles();
     for (const f of files) {
@@ -66,7 +66,6 @@ export class VaultSnapshot {
       }
     }
 
-    // Deleted files — in snapshot but not in current vault
     for (const p of Object.keys(this.snapshot)) {
       if (!currentPaths.has(p)) {
         ops[p] = 'delete';

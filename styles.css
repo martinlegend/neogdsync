@@ -1,20 +1,17 @@
+.neogdsync-monospace-input {
+  width: 340px;
+  font-family: var(--font-monospace);
+}
+
 .neogdsync-btn-row {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 12px;
 }
-.neogdsync-btn-row button {
-  flex: 1;
-  min-width: 120px;
-}
+
 .neogdsync-conflict {
+  margin-bottom: 12px;
+  padding: 8px;
   border-left: 3px solid var(--color-orange);
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  background: var(--background-secondary);
-  border-radius: 4px;
-}
-.neogdsync-ribbon.is-active {
-  color: var(--color-green);
 }

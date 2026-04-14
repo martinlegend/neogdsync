@@ -3,14 +3,12 @@
  * Handles push, pull, smart sync, conflict detection.
  */
 
-import { App, normalizePath, TFile, Notice } from 'obsidian';
+import { App, normalizePath, TFile } from 'obsidian';
 import { DriveApi } from './driveApi';
 import { PathIndex } from './pathIndex';
 import { VaultSnapshot } from './snapshot';
-import { NeoSettings, PendingOps, ConflictRecord } from './types';
+import { NeoSettings, PendingOps, ConflictRecord, DriveChange } from './types';
 import * as mime from './mime';
-
-const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
 export interface SyncResult {
   pushed: string[];
@@ -41,7 +39,6 @@ export class Syncer {
     if (path.includes('node_modules/')) return true;
     if (path.startsWith('.git/')) return true;
     if (path === '.neogdsync') return true;
-    // User-defined excludes
     for (const pat of this.settings.excludePaths) {
       if (matchGlob(pat, path)) return true;
     }
@@ -53,29 +50,27 @@ export class Syncer {
   async smartSync(): Promise<SyncResult> {
     const result: SyncResult = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
 
-    // Step 1: merge offline diff into pendingOps
     this.onProgress('Scanning local changes…');
     const offlineDiff = this.snapshot.computeDiff(p => this.exclude(p));
     for (const [path, op] of Object.entries(offlineDiff)) {
-      if (!this.pendingOps[path]) {
-        this.pendingOps[path] = op;
-      }
+      if (!this.pendingOps[path]) this.pendingOps[path] = op;
     }
 
-    // Step 2: fetch Drive changes since last sync (graceful — push-only if offline)
     this.onProgress('Fetching Drive changes…');
-    let changes: any[] = [];
+    let changes: DriveChange[] = [];
     let newToken = this.settings.changesToken;
     try {
       if (!this.settings.changesToken) {
         this.settings.changesToken = await this.drive.getStartPageToken();
       }
-      const result = await this.drive.getChanges(this.settings.changesToken);
-      changes = result.changes;
-      newToken = result.newToken;
-    } catch (fetchErr: any) {
-      console.warn('[NeoGDSync] Could not fetch Drive changes (offline or API error), pushing local changes only:', fetchErr.message);
+      const r = await this.drive.getChanges(this.settings.changesToken);
+      changes = r.changes;
+      newToken = r.newToken;
+    } catch (err: unknown) {
+      console.warn('[NeoGDSync] Could not fetch Drive changes, pushing local changes only:',
+        err instanceof Error ? err.message : String(err));
     }
+
     const driveChanged = new Map<string, { removed: boolean; mtime?: string }>();
     const driveIdToPath = new Map<string, string>();
     for (const p of this.index.allPaths()) {
@@ -85,14 +80,10 @@ export class Syncer {
     for (const c of changes) {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
-        driveChanged.set(localPath, {
-          removed: c.removed,
-          mtime: c.file?.modifiedTime,
-        });
+        driveChanged.set(localPath, { removed: c.removed, mtime: c.file?.modifiedTime });
       }
     }
 
-    // Step 3: process pending ops (push direction)
     const allOps = Object.entries(this.pendingOps);
     let done = 0;
     for (const [path, op] of allOps) {
@@ -102,8 +93,6 @@ export class Syncer {
         if (op === 'delete') {
           await this.handleDelete(path, result);
         } else {
-          // Real conflict = Drive mtime is NEWER than what we last recorded in the index
-          // This is token-independent and avoids false conflicts from stale changesTokens
           const driveChange = driveChanged.get(path);
           const indexEntry = this.index.get(path);
           const isDriveNewer = driveChange
@@ -112,32 +101,26 @@ export class Syncer {
             && indexEntry
             && driveChange.mtime > indexEntry.driveMtime;
           if (isDriveNewer) {
-            await this.handleConflict(path, driveChange.mtime, result);
+            await this.handleConflict(path, driveChange.mtime as string, result);
           } else {
             await this.handlePush(path, op, result);
           }
         }
-      } catch (e: any) {
-        result.errors.push({ path, error: e.message });
+      } catch (err: unknown) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
 
-    // Step 4: pull new files from Drive (files on Drive not in local ops, newer than lastSyncedAt)
     await this.pullNewFromDrive(driveChanged, result);
 
-    // Step 5: update token and snapshot
     this.settings.changesToken = newToken;
     this.settings.lastSyncedAt = Date.now();
-    await this.snapshot.save(p => this.exclude(p));
+    this.snapshot.save(p => this.exclude(p));
     await this.index.save();
 
-    // Clear pushed, deleted, AND pulled from pendingOps.
-    // pulled files trigger vault modify events via writeLocal/modifyBinary,
-    // which re-adds them to pendingOps; clear all after sync completes.
     for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
       delete this.pendingOps[p];
     }
-
     return result;
   }
 
@@ -145,8 +128,7 @@ export class Syncer {
 
   async forcePush(): Promise<SyncResult> {
     const result: SyncResult = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    const ops = this.pendingOps;
-    const allOps = Object.entries(ops);
+    const allOps = Object.entries(this.pendingOps);
     let done = 0;
     for (const [path, op] of allOps) {
       this.onProgress(`[${++done}/${allOps.length}] push: ${path}`);
@@ -154,16 +136,15 @@ export class Syncer {
       try {
         if (op === 'delete') await this.handleDelete(path, result);
         else await this.handlePush(path, op, result);
-      } catch (e: any) {
-        result.errors.push({ path, error: e.message });
+      } catch (err: unknown) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
     this.settings.lastSyncedAt = Date.now();
-    // Initialize changesToken after first push so smart sync can track Drive changes going forward
     if (!this.settings.changesToken) {
       this.settings.changesToken = await this.drive.getStartPageToken();
     }
-    await this.snapshot.save(p => this.exclude(p));
+    this.snapshot.save(p => this.exclude(p));
     await this.index.save();
     for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
       delete this.pendingOps[p];
@@ -187,14 +168,13 @@ export class Syncer {
         const bytes = await this.drive.downloadFile(entry.driveId);
         await writeLocal(this.app, path, bytes);
         result.pulled.push(path);
-      } catch (e: any) {
-        result.errors.push({ path, error: e.message });
+      } catch (err: unknown) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
     this.settings.lastSyncedAt = Date.now();
-    await this.snapshot.save(p => this.exclude(p));
+    this.snapshot.save(p => this.exclude(p));
     await this.index.save();
-    // Clear pulled files — writeLocal fires vault modify events which re-add them
     for (const p of [...result.pulled, ...result.deleted]) {
       delete this.pendingOps[p];
     }
@@ -206,18 +186,14 @@ export class Syncer {
   private async handlePush(path: string, op: 'create' | 'modify', result: SyncResult): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
     if (!file || !(file instanceof TFile)) return;
-
     const bytes = await this.app.vault.readBinary(file);
     const mtime = new Date(file.stat.mtime).toISOString();
     const mimeType = mime.fromPath(path);
     const cached = this.index.get(path);
-
     if (cached && !cached.isFolder) {
-      // File already exists on Drive — update in place, never create duplicate
       await this.drive.updateFile(cached.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached, driveMtime: mtime, syncedAt: Date.now() });
     } else {
-      // File not in index → truly new, upload
       const parentId = await this.index.resolveParentFolder(path);
       const driveId = await this.drive.uploadFile(
         file.name, parentId, bytes, mimeType, mtime, this.settings.keepRevisions,
@@ -237,7 +213,6 @@ export class Syncer {
   }
 
   private async handleConflict(path: string, driveMtime: string, result: SyncResult): Promise<void> {
-    // Pull Drive version as .conflict copy, keep local as-is
     const entry = this.index.get(path);
     if (!entry) return;
     const bytes = await this.drive.downloadFile(entry.driveId);
@@ -247,14 +222,7 @@ export class Syncer {
     await writeLocal(this.app, conflictPath, bytes);
     const localFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
     const localMtime = localFile instanceof TFile ? localFile.stat.mtime : 0;
-    result.conflicts.push({
-      localPath: path,
-      localMtime,
-      driveMtime,
-      conflictCopyPath: conflictPath,
-      detectedAt: Date.now(),
-    });
-    // Still push local version
+    result.conflicts.push({ localPath: path, localMtime, driveMtime, conflictCopyPath: conflictPath, detectedAt: Date.now() });
     await this.handlePush(path, 'modify', result);
   }
 
@@ -262,12 +230,10 @@ export class Syncer {
     driveChanged: Map<string, { removed: boolean; mtime?: string }>,
     result: SyncResult,
   ): Promise<void> {
-    // Find Drive-changed files not in local pendingOps
     for (const [path, change] of driveChanged.entries()) {
       if (this.exclude(path)) continue;
-      if (this.pendingOps[path]) continue; // handled in push phase
+      if (this.pendingOps[path]) continue;
       if (change.removed) {
-        // Drive deleted something local
         const localFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
         if (localFile) {
           await this.app.vault.trash(localFile, true);
@@ -276,7 +242,6 @@ export class Syncer {
         }
         continue;
       }
-      // Download updated file
       const entry = this.index.get(path);
       if (!entry || entry.isFolder) continue;
       try {
@@ -286,8 +251,8 @@ export class Syncer {
           this.index.set(path, { ...entry, driveMtime: change.mtime, syncedAt: Date.now() });
         }
         result.pulled.push(path);
-      } catch (e: any) {
-        result.errors.push({ path, error: e.message });
+      } catch (err: unknown) {
+        result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
     }
   }
@@ -301,7 +266,7 @@ async function writeLocal(app: App, path: string, bytes: ArrayBuffer): Promise<v
   if (parts.length > 1) {
     const dir = normalizePath(parts.slice(0, -1).join('/'));
     if (!(await app.vault.adapter.exists(dir))) {
-      await app.vault.createFolder(dir);
+      await app.vault.adapter.mkdir(dir);
     }
   }
   const existing = app.vault.getAbstractFileByPath(norm);
@@ -310,4 +275,16 @@ async function writeLocal(app: App, path: string, bytes: ArrayBuffer): Promise<v
   } else {
     await app.vault.createBinary(norm, bytes);
   }
+}
+
+// ── Glob matching ──────────────────────────────────────────────
+
+function matchGlob(pattern: string, path: string): boolean {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\x00')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\x00/g, '.*')
+    .replace(/\?/g, '[^/]');
+  return new RegExp('^' + escaped + '$').test(path);
 }
