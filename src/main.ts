@@ -222,9 +222,21 @@ export default class NeoGDSync extends Plugin {
       notice.setMessage(`NeoGDSync: ERROR — ${e.message}`);
       setTimeout(() => notice.hide(), 5000);
       console.error('[NeoGDSync]', e);
-    } finally {
       this.syncing = false;
       this.updateStatus();
+    } finally {
+      // Keep syncing=true for 600ms so vault events fired by writeLocal/modifyBinary
+      // (which fire asynchronously after the awaits complete) are still suppressed by
+      // handleModify/handleCreate. Then re-save snapshot with fresh TFile stats.
+      setTimeout(() => {
+        this.snapshot.save(p => this.exclude(p))
+          .then(() => this.saveSettings())
+          .catch(console.error)
+          .finally(() => {
+            this.syncing = false;
+            this.updateStatus();
+          });
+      }, 600);
     }
   }
 

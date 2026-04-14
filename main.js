@@ -962,9 +962,21 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
       notice.setMessage(`NeoGDSync: ERROR \u2014 ${e.message}`);
       setTimeout(() => notice.hide(), 5e3);
       console.error("[NeoGDSync]", e);
-    } finally {
       this.syncing = false;
       this.updateStatus();
+    } finally {
+      // Keep syncing=true for 600ms so vault events fired by writeLocal/modifyBinary
+      // (which fire asynchronously after the awaits complete) are still suppressed by
+      // handleModify/handleCreate. Then re-save snapshot with fresh TFile stats.
+      setTimeout(() => {
+        this.snapshot.save((p) => this.exclude(p))
+          .then(() => this.saveSettings())
+          .catch(console.error)
+          .finally(() => {
+            this.syncing = false;
+            this.updateStatus();
+          });
+      }, 600);
     }
   }
   async rebuildIndex() {
