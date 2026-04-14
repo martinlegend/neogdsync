@@ -581,7 +581,9 @@ var Syncer = class {
     this.settings.lastSyncedAt = Date.now();
     await this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    for (const p of [...result.pushed, ...result.deleted]) {
+    // Clear pushed, deleted, AND pulled — pulled files trigger handleModify via
+    // vault.modifyBinary() which re-adds them to pendingOps; clear all after sync.
+    for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
       delete this.pendingOps[p];
     }
     return result;
@@ -608,7 +610,7 @@ var Syncer = class {
     }
     await this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    for (const p of [...result.pushed, ...result.deleted]) {
+    for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
       delete this.pendingOps[p];
     }
     return result;
@@ -635,6 +637,10 @@ var Syncer = class {
     this.settings.lastSyncedAt = Date.now();
     await this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
+    // Clear pulled files — writeLocal fires vault modify events which re-add them
+    for (const p of [...result.pulled, ...result.deleted]) {
+      delete this.pendingOps[p];
+    }
     return result;
   }
   // ── Internal helpers ───────────────────────────────────────────
