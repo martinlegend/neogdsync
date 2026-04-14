@@ -94,6 +94,7 @@ export default class NeoGDSync extends Plugin {
   }
 
   private handleCreate(f: TAbstractFile) {
+    if (this.syncing) return; // sync itself calls writeLocal which fires create events
     if (this.exclude(f.path)) return;
     if (!(f instanceof TFile)) return; // skip folders
     const cur = this.pendingOps[f.path];
@@ -107,6 +108,7 @@ export default class NeoGDSync extends Plugin {
   }
 
   private handleModify(f: TAbstractFile) {
+    if (this.syncing) return; // sync itself calls writeLocal/modifyBinary which fires modify events
     if (this.exclude(f.path) || !(f instanceof TFile)) return;
     // Skip if file matches snapshot (avoids false positives on startup events)
     const snap = this.snapshot.get(f.path);

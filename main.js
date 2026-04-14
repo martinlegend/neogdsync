@@ -830,6 +830,7 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     return false;
   }
   handleCreate(f) {
+    if (this.syncing) return; // sync itself calls writeLocal which fires create events
     if (this.exclude(f.path)) return;
     if (!(f instanceof import_obsidian4.TFile)) return;  // skip folders
     const cur = this.pendingOps[f.path];
@@ -842,6 +843,7 @@ var NeoGDSync = class extends import_obsidian4.Plugin {
     this.debouncedSave();
   }
   handleModify(f) {
+    if (this.syncing) return; // sync itself calls writeLocal/modifyBinary which fires modify events
     if (this.exclude(f.path) || !(f instanceof import_obsidian4.TFile)) return;
     // Skip if file matches snapshot (Obsidian fires modify events on startup for all files)
     const snap = this.snapshot.get(f.path);
