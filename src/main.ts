@@ -38,16 +38,16 @@ export default class NeoGDSync extends Plugin {
       this.registerEvents();
     });
 
-    const ribbonIcon = this.addRibbonIcon('cloud', 'NeoGDSync', () => this.openSyncModal());
+    const ribbonIcon = this.addRibbonIcon('cloud', 'Sync vault', () => this.openSyncModal());
     ribbonIcon.addClass('neogdsync-ribbon');
 
     this.statusEl = this.addStatusBarItem();
     this.updateStatus();
 
     this.addCommand({ id: 'smart-sync',    name: 'Smart sync (auto conflict detect)', callback: () => this.runSync('smart') });
-    this.addCommand({ id: 'force-push',    name: 'Force push (local → Drive)',         callback: () => this.runSync('push') });
-    this.addCommand({ id: 'force-pull',    name: 'Force pull (Drive → local)',          callback: () => this.runSync('pull') });
-    this.addCommand({ id: 'rebuild-index', name: 'Rebuild Drive index',                 callback: () => this.rebuildIndex() });
+    this.addCommand({ id: 'force-push',    name: 'Force push (local → drive)',         callback: () => this.runSync('push') });
+    this.addCommand({ id: 'force-pull',    name: 'Force pull (drive → local)',          callback: () => this.runSync('pull') });
+    this.addCommand({ id: 'rebuild-index', name: 'Rebuild drive index',                 callback: () => this.rebuildIndex() });
     this.addCommand({ id: 'show-conflicts', name: 'Show conflicts',                     callback: () => this.showConflicts() });
 
     this.addSettingTab(new NeoSettingsTab(this.app, this));
@@ -57,7 +57,7 @@ export default class NeoGDSync extends Plugin {
       void this.runSync(mode);
     });
 
-    new Notice('NeoGDSync loaded ✓');
+    new Notice('Sync plugin loaded');
   }
 
   async onunload() {
@@ -177,17 +177,17 @@ export default class NeoGDSync extends Plugin {
 
   async runSync(mode: 'smart' | 'push' | 'pull') {
     if (this.syncing) { new Notice('Sync already in progress'); return; }
-    if (!this.settings.refreshToken) { new Notice('NeoGDSync: no refresh token configured'); return; }
+    if (!this.settings.refreshToken) { new Notice('No refresh token configured'); return; }
 
     this.syncing = true;
     this.updateStatus('Syncing…');
-    const notice = new Notice(`NeoGDSync: ${mode} sync started…`, 0);
+    const notice = new Notice('Sync started…', 0);
 
     try {
       const syncer = new Syncer(
         this.app, this.drive, this.index, this.snapshot,
         this.settings, this.pendingOps,
-        (msg: string) => { notice.setMessage(`NeoGDSync: ${msg}`); },
+        (msg: string) => { notice.setMessage(msg); },
       );
 
       let result: SyncResult;
@@ -203,14 +203,14 @@ export default class NeoGDSync extends Plugin {
       const summary = `↑${result.pushed.length} ↓${result.pulled.length} 🗑${result.deleted.length}` +
         (result.conflicts.length ? ` ⚠️${result.conflicts.length} conflicts` : '') +
         (result.errors.length ? ` ❌${result.errors.length} errors` : '');
-      notice.setMessage(`NeoGDSync: done — ${summary}`);
+      notice.setMessage(`Done — ${summary}`);
       setTimeout(() => notice.hide(), 4000);
 
       if (result.errors.length) console.error('[NeoGDSync] Errors:', result.errors);
-      if (result.conflicts.length) new Notice(`⚠️ ${result.conflicts.length} conflict(s) detected — check NeoGDSync conflicts`, 6000);
+      if (result.conflicts.length) new Notice(`${result.conflicts.length} conflict(s) detected`, 6000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      notice.setMessage(`NeoGDSync: ERROR — ${msg}`);
+      notice.setMessage(`Sync error: ${msg}`);
       setTimeout(() => notice.hide(), 5000);
       console.error('[NeoGDSync]', err);
       this.syncing = false;
@@ -233,14 +233,14 @@ export default class NeoGDSync extends Plugin {
   async rebuildIndex() {
     if (this.syncing) { new Notice('Sync in progress'); return; }
     this.syncing = true;
-    const notice = new Notice('NeoGDSync: rebuilding Drive index…', 0);
+    const notice = new Notice('Rebuilding drive index…', 0);
     try {
-      await this.index.rebuild(msg => notice.setMessage(`NeoGDSync: ${msg}`));
-      notice.setMessage('NeoGDSync: index rebuilt ✓');
+      await this.index.rebuild(msg => notice.setMessage(msg));
+      notice.setMessage('Drive index rebuilt');
       setTimeout(() => notice.hide(), 3000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      notice.setMessage(`NeoGDSync: rebuild failed — ${msg}`);
+      notice.setMessage(`Rebuild failed: ${msg}`);
       setTimeout(() => notice.hide(), 5000);
     } finally {
       this.syncing = false;
@@ -301,7 +301,7 @@ class SyncModal extends Modal {
 
   onOpen() {
     const { contentEl } = this;
-    contentEl.createEl('h2', { text: 'NeoGDSync' });
+    contentEl.createEl('h2', { text: 'Sync' });
 
     const pending = Object.keys(this.plugin.pendingOps).length;
     contentEl.createEl('p', { text: `Pending operations: ${pending}` });
@@ -314,11 +314,11 @@ class SyncModal extends Modal {
     }
 
     const btnRow = contentEl.createDiv({ cls: 'neogdsync-btn-row' });
-    btnRow.createEl('button', { text: '⚡ Smart sync' }).onclick  = () => { this.close(); void this.plugin.runSync('smart'); };
-    btnRow.createEl('button', { text: '↑ Force push' }).onclick   = () => { this.close(); void this.plugin.runSync('push'); };
-    btnRow.createEl('button', { text: '↓ Force pull' }).onclick   = () => { this.close(); void this.plugin.runSync('pull'); };
+    btnRow.createEl('button', { text: 'Smart sync' }).onclick  = () => { this.close(); void this.plugin.runSync('smart'); };
+    btnRow.createEl('button', { text: 'Force push' }).onclick   = () => { this.close(); void this.plugin.runSync('push'); };
+    btnRow.createEl('button', { text: 'Force pull' }).onclick   = () => { this.close(); void this.plugin.runSync('pull'); };
     if (this.plugin.conflicts.length > 0) {
-      btnRow.createEl('button', { text: `⚠️ ${this.plugin.conflicts.length} Conflicts` })
+      btnRow.createEl('button', { text: `${this.plugin.conflicts.length} conflicts` })
         .onclick = () => { this.close(); this.plugin.showConflicts(); };
     }
   }
@@ -357,7 +357,7 @@ class NeoSettingsTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName('NeoGDSync').setHeading();
+    new Setting(containerEl).setHeading();
 
     new Setting(containerEl)
       .setName('Refresh token')
@@ -371,8 +371,8 @@ class NeoSettingsTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('Vault root folder ID')
-      .setDesc('Google Drive folder ID that is the root of this vault. Change requires plugin reload.')
+      .setName('Vault root folder id')
+      .setDesc('Google Drive folder id that is the root of this vault. Change requires plugin reload.')
       .addText(t => {
         t.inputEl.addClass('neogdsync-monospace-input');
         t.setPlaceholder('1xGNFQGB…').setValue(this.plugin.settings.vaultRootId)
@@ -397,7 +397,7 @@ class NeoSettingsTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('Keep revisions').setDesc('Keep file revisions on Drive (version history)')
+      .setName('Keep revisions').setDesc('Keep file revisions on drive (version history)')
       .addToggle(t => t.setValue(this.plugin.settings.keepRevisions)
         .onChange(async v => { this.plugin.settings.keepRevisions = v; await this.plugin.saveSettings(); }));
 
@@ -411,7 +411,7 @@ class NeoSettingsTab extends PluginSettingTab {
       }));
 
     new Setting(containerEl)
-      .setName('Rebuild Drive index').setDesc('Crawl Drive vault from root and rebuild local index')
+      .setName('Rebuild drive index').setDesc('Crawl drive vault from root and rebuild local index')
       .addButton(b => b.setButtonText('Rebuild').onClick(() => { void this.plugin.rebuildIndex(); }));
 
     new Setting(containerEl).setName('Status').setHeading();

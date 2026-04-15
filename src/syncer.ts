@@ -56,7 +56,7 @@ export class Syncer {
       if (!this.pendingOps[path]) this.pendingOps[path] = op;
     }
 
-    this.onProgress('Fetching Drive changes…');
+    this.onProgress('Fetching drive changes…');
     let changes: DriveChange[] = [];
     let newToken = this.settings.changesToken;
     try {
@@ -156,7 +156,7 @@ export class Syncer {
 
   async forcePull(): Promise<SyncResult> {
     const result: SyncResult = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    this.onProgress('Rebuilding Drive index…');
+    this.onProgress('Rebuilding drive index…');
     await this.index.rebuild(msg => this.onProgress(`Crawling: ${msg}`));
     const paths = this.index.allPaths();
     let done = 0;
@@ -280,11 +280,21 @@ async function writeLocal(app: App, path: string, bytes: ArrayBuffer): Promise<v
 // ── Glob matching ──────────────────────────────────────────────
 
 function matchGlob(pattern: string, path: string): boolean {
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '\x00')
-    .replace(/\*/g, '[^/]*')
-    .replace(/\x00/g, '.*')
-    .replace(/\?/g, '[^/]');
-  return new RegExp('^' + escaped + '$').test(path);
+  let r = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '*' && pattern[i + 1] === '*') {
+      r += '.*';
+      i++;
+    } else if (c === '*') {
+      r += '[^/]*';
+    } else if (c === '?') {
+      r += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      r += '\\' + c;
+    } else {
+      r += c;
+    }
+  }
+  return new RegExp('^' + r + '$').test(path);
 }

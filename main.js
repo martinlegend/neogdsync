@@ -522,7 +522,7 @@ var Syncer = class {
     for (const [path, op] of Object.entries(offlineDiff)) {
       if (!this.pendingOps[path]) this.pendingOps[path] = op;
     }
-    this.onProgress("Fetching Drive changes\u2026");
+    this.onProgress("Fetching drive changes\u2026");
     let changes = [];
     let newToken = this.settings.changesToken;
     try {
@@ -611,7 +611,7 @@ var Syncer = class {
   // ── Force Pull ─────────────────────────────────────────────────
   async forcePull() {
     const result = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    this.onProgress("Rebuilding Drive index\u2026");
+    this.onProgress("Rebuilding drive index\u2026");
     await this.index.rebuild((msg) => this.onProgress(`Crawling: ${msg}`));
     const paths = this.index.allPaths();
     let done = 0;
@@ -729,8 +729,23 @@ async function writeLocal(app, path, bytes) {
   }
 }
 function matchGlob(pattern, path) {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\0").replace(/\*/g, "[^/]*").replace(/\x00/g, ".*").replace(/\?/g, "[^/]");
-  return new RegExp("^" + escaped + "$").test(path);
+  let r = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "*" && pattern[i + 1] === "*") {
+      r += ".*";
+      i++;
+    } else if (c === "*") {
+      r += "[^/]*";
+    } else if (c === "?") {
+      r += "[^/]";
+    } else if (".+^${}()|[]\\".includes(c)) {
+      r += "\\" + c;
+    } else {
+      r += c;
+    }
+  }
+  return new RegExp("^" + r + "$").test(path);
 }
 
 // src/main.ts
@@ -753,21 +768,21 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       this.mergeOfflineDiff();
       this.registerEvents();
     });
-    const ribbonIcon = this.addRibbonIcon("cloud", "NeoGDSync", () => this.openSyncModal());
+    const ribbonIcon = this.addRibbonIcon("cloud", "Sync vault", () => this.openSyncModal());
     ribbonIcon.addClass("neogdsync-ribbon");
     this.statusEl = this.addStatusBarItem();
     this.updateStatus();
     this.addCommand({ id: "smart-sync", name: "Smart sync (auto conflict detect)", callback: () => this.runSync("smart") });
-    this.addCommand({ id: "force-push", name: "Force push (local \u2192 Drive)", callback: () => this.runSync("push") });
-    this.addCommand({ id: "force-pull", name: "Force pull (Drive \u2192 local)", callback: () => this.runSync("pull") });
-    this.addCommand({ id: "rebuild-index", name: "Rebuild Drive index", callback: () => this.rebuildIndex() });
+    this.addCommand({ id: "force-push", name: "Force push (local \u2192 drive)", callback: () => this.runSync("push") });
+    this.addCommand({ id: "force-pull", name: "Force pull (drive \u2192 local)", callback: () => this.runSync("pull") });
+    this.addCommand({ id: "rebuild-index", name: "Rebuild drive index", callback: () => this.rebuildIndex() });
     this.addCommand({ id: "show-conflicts", name: "Show conflicts", callback: () => this.showConflicts() });
     this.addSettingTab(new NeoSettingsTab(this.app, this));
     this.registerObsidianProtocolHandler("neogdsync", (params) => {
       const mode = params.mode === "push" ? "push" : params.mode === "pull" ? "pull" : "smart";
       void this.runSync(mode);
     });
-    new import_obsidian5.Notice("NeoGDSync loaded \u2713");
+    new import_obsidian5.Notice("Sync plugin loaded");
   }
   async onunload() {
     this.snapshot.save((p) => this.exclude(p));
@@ -876,12 +891,12 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       return;
     }
     if (!this.settings.refreshToken) {
-      new import_obsidian5.Notice("NeoGDSync: no refresh token configured");
+      new import_obsidian5.Notice("No refresh token configured");
       return;
     }
     this.syncing = true;
     this.updateStatus("Syncing\u2026");
-    const notice = new import_obsidian5.Notice(`NeoGDSync: ${mode} sync started\u2026`, 0);
+    const notice = new import_obsidian5.Notice("Sync started\u2026", 0);
     try {
       const syncer = new Syncer(
         this.app,
@@ -891,7 +906,7 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
         this.settings,
         this.pendingOps,
         (msg) => {
-          notice.setMessage(`NeoGDSync: ${msg}`);
+          notice.setMessage(msg);
         }
       );
       let result;
@@ -903,13 +918,13 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       await this.saveSettings();
       await this.index.save();
       const summary = `\u2191${result.pushed.length} \u2193${result.pulled.length} \u{1F5D1}${result.deleted.length}` + (result.conflicts.length ? ` \u26A0\uFE0F${result.conflicts.length} conflicts` : "") + (result.errors.length ? ` \u274C${result.errors.length} errors` : "");
-      notice.setMessage(`NeoGDSync: done \u2014 ${summary}`);
+      notice.setMessage(`Done \u2014 ${summary}`);
       setTimeout(() => notice.hide(), 4e3);
       if (result.errors.length) console.error("[NeoGDSync] Errors:", result.errors);
-      if (result.conflicts.length) new import_obsidian5.Notice(`\u26A0\uFE0F ${result.conflicts.length} conflict(s) detected \u2014 check NeoGDSync conflicts`, 6e3);
+      if (result.conflicts.length) new import_obsidian5.Notice(`${result.conflicts.length} conflict(s) detected`, 6e3);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      notice.setMessage(`NeoGDSync: ERROR \u2014 ${msg}`);
+      notice.setMessage(`Sync error: ${msg}`);
       setTimeout(() => notice.hide(), 5e3);
       console.error("[NeoGDSync]", err);
       this.syncing = false;
@@ -930,14 +945,14 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       return;
     }
     this.syncing = true;
-    const notice = new import_obsidian5.Notice("NeoGDSync: rebuilding Drive index\u2026", 0);
+    const notice = new import_obsidian5.Notice("Rebuilding drive index\u2026", 0);
     try {
-      await this.index.rebuild((msg) => notice.setMessage(`NeoGDSync: ${msg}`));
-      notice.setMessage("NeoGDSync: index rebuilt \u2713");
+      await this.index.rebuild((msg) => notice.setMessage(msg));
+      notice.setMessage("Drive index rebuilt");
       setTimeout(() => notice.hide(), 3e3);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      notice.setMessage(`NeoGDSync: rebuild failed \u2014 ${msg}`);
+      notice.setMessage(`Rebuild failed: ${msg}`);
       setTimeout(() => notice.hide(), 5e3);
     } finally {
       this.syncing = false;
@@ -993,7 +1008,7 @@ var SyncModal = class extends import_obsidian5.Modal {
   }
   onOpen() {
     const { contentEl } = this;
-    contentEl.createEl("h2", { text: "NeoGDSync" });
+    contentEl.createEl("h2", { text: "Sync" });
     const pending = Object.keys(this.plugin.pendingOps).length;
     contentEl.createEl("p", { text: `Pending operations: ${pending}` });
     if (pending > 0) {
@@ -1004,20 +1019,20 @@ var SyncModal = class extends import_obsidian5.Modal {
       if (pending > 20) ul.createEl("li", { text: `\u2026 and ${pending - 20} more` });
     }
     const btnRow = contentEl.createDiv({ cls: "neogdsync-btn-row" });
-    btnRow.createEl("button", { text: "\u26A1 Smart sync" }).onclick = () => {
+    btnRow.createEl("button", { text: "Smart sync" }).onclick = () => {
       this.close();
       void this.plugin.runSync("smart");
     };
-    btnRow.createEl("button", { text: "\u2191 Force push" }).onclick = () => {
+    btnRow.createEl("button", { text: "Force push" }).onclick = () => {
       this.close();
       void this.plugin.runSync("push");
     };
-    btnRow.createEl("button", { text: "\u2193 Force pull" }).onclick = () => {
+    btnRow.createEl("button", { text: "Force pull" }).onclick = () => {
       this.close();
       void this.plugin.runSync("pull");
     };
     if (this.plugin.conflicts.length > 0) {
-      btnRow.createEl("button", { text: `\u26A0\uFE0F ${this.plugin.conflicts.length} Conflicts` }).onclick = () => {
+      btnRow.createEl("button", { text: `${this.plugin.conflicts.length} conflicts` }).onclick = () => {
         this.close();
         this.plugin.showConflicts();
       };
@@ -1060,14 +1075,14 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian5.Setting(containerEl).setName("NeoGDSync").setHeading();
+    new import_obsidian5.Setting(containerEl).setHeading();
     new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc("Google OAuth2 refresh token").addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
       this.plugin.settings.refreshToken = v.trim();
       this.plugin.drive = new DriveApi(v.trim());
       clearTokenCache();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
+    new import_obsidian5.Setting(containerEl).setName("Vault root folder id").setDesc("Google Drive folder id that is the root of this vault. Change requires plugin reload.").addText((t) => {
       t.inputEl.addClass("neogdsync-monospace-input");
       t.setPlaceholder("1xGNFQGB\u2026").setValue(this.plugin.settings.vaultRootId).onChange(async (v) => {
         this.plugin.settings.vaultRootId = v.trim();
@@ -1080,7 +1095,7 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
       this.plugin.settings.syncMode = v;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Keep revisions").setDesc("Keep file revisions on Drive (version history)").addToggle((t) => t.setValue(this.plugin.settings.keepRevisions).onChange(async (v) => {
+    new import_obsidian5.Setting(containerEl).setName("Keep revisions").setDesc("Keep file revisions on drive (version history)").addToggle((t) => t.setValue(this.plugin.settings.keepRevisions).onChange(async (v) => {
       this.plugin.settings.keepRevisions = v;
       await this.plugin.saveSettings();
     }));
@@ -1090,7 +1105,7 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
       this.plugin.updateStatus();
       this.display();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Rebuild Drive index").setDesc("Crawl Drive vault from root and rebuild local index").addButton((b) => b.setButtonText("Rebuild").onClick(() => {
+    new import_obsidian5.Setting(containerEl).setName("Rebuild drive index").setDesc("Crawl drive vault from root and rebuild local index").addButton((b) => b.setButtonText("Rebuild").onClick(() => {
       void this.plugin.rebuildIndex();
     }));
     new import_obsidian5.Setting(containerEl).setName("Status").setHeading();
