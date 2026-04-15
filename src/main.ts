@@ -371,8 +371,8 @@ class NeoSettingsTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('Vault root folder id')
-      .setDesc('Google Drive folder id that is the root of this vault. Change requires plugin reload.')
+      .setName('Vault root folder ID')
+      .setDesc('Google Drive folder ID that is the root of this vault. Change requires plugin reload.')
       .addText(t => {
         t.inputEl.addClass('neogdsync-monospace-input');
         t.setPlaceholder('1xGNFQGB…').setValue(this.plugin.settings.vaultRootId)

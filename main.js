@@ -1082,7 +1082,7 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
       clearTokenCache();
       await this.plugin.saveSettings();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Vault root folder id").setDesc("Google Drive folder id that is the root of this vault. Change requires plugin reload.").addText((t) => {
+    new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
       t.inputEl.addClass("neogdsync-monospace-input");
       t.setPlaceholder("1xGNFQGB\u2026").setValue(this.plugin.settings.vaultRootId).onChange(async (v) => {
         this.plugin.settings.vaultRootId = v.trim();
