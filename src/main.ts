@@ -361,7 +361,7 @@ class NeoSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Refresh token')
-      .setDesc('Google OAuth2 refresh token')
+      .setDesc('Refresh token for Google Drive')
       .addText(t => t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
         .onChange(async v => {
           this.plugin.settings.refreshToken = v.trim();
@@ -375,7 +375,7 @@ class NeoSettingsTab extends PluginSettingTab {
       .setDesc('Google Drive folder ID that is the root of this vault. Change requires plugin reload.')
       .addText(t => {
         t.inputEl.addClass('neogdsync-monospace-input');
-        t.setPlaceholder('1xGNFQGB…').setValue(this.plugin.settings.vaultRootId)
+        t.setPlaceholder('Root folder ID').setValue(this.plugin.settings.vaultRootId)
           .onChange(async v => {
             this.plugin.settings.vaultRootId = v.trim();
             this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
