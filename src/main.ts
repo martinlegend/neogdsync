@@ -248,7 +248,7 @@ export default class NeoGDSync extends Plugin {
     }
   }
 
-  showConflicts() { new ConflictModal(this.app, this.conflicts).open(); }
+  showConflicts() { new ConflictModal(this.app, this).open(); }
   openSyncModal() { new SyncModal(this.app, this).open(); }
 
   // ── Status bar ─────────────────────────────────────────────────
@@ -329,13 +329,14 @@ class SyncModal extends Modal {
 // ── Conflict Modal ─────────────────────────────────────────────
 
 class ConflictModal extends Modal {
-  constructor(app: App, private conflicts: ConflictRecord[]) { super(app); }
+  constructor(app: App, private plugin: NeoGDSync) { super(app); }
 
   onOpen() {
     const { contentEl } = this;
     contentEl.createEl('h2', { text: 'Conflicts' });
-    if (!this.conflicts.length) { contentEl.createEl('p', { text: 'No conflicts.' }); return; }
-    for (const c of this.conflicts) {
+    const conflicts = this.plugin.conflicts;
+    if (!conflicts.length) { contentEl.createEl('p', { text: 'No conflicts.' }); return; }
+    for (const c of conflicts) {
       const div = contentEl.createDiv({ cls: 'neogdsync-conflict' });
       div.createEl('strong', { text: c.localPath });
       div.createEl('br');
@@ -343,6 +344,14 @@ class ConflictModal extends Modal {
       div.createEl('br');
       div.createEl('small', { text: `Drive copy saved as: ${c.conflictCopyPath}` });
     }
+    contentEl.createEl('hr');
+    contentEl.createEl('button', { text: 'Clear all conflicts' })
+      .onclick = async () => {
+        this.plugin.conflicts = [];
+        await this.plugin.saveSettings();
+        this.close();
+        new Notice('Conflicts cleared');
+      };
   }
 
   onClose() { this.contentEl.empty(); }
