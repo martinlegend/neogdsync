@@ -156,7 +156,8 @@ export class Syncer {
       }
     }
 
-    await this.pullNewFromDrive(driveChanged, result);
+    const handled = new Set([...result.pushed, ...result.pulled, ...result.deleted]);
+    await this.pullNewFromDrive(driveChanged, result, handled);
 
     this.settings.changesToken = newToken;
     this.settings.lastSyncedAt = Date.now();
@@ -288,10 +289,13 @@ export class Syncer {
   private async pullNewFromDrive(
     driveChanged: Map<string, { removed: boolean; mtime?: string }>,
     result: SyncResult,
+    handled: Set<string>,
   ): Promise<void> {
     for (const [path, change] of driveChanged.entries()) {
       if (this.exclude(path)) continue;
-      if (this.pendingOps[path]) continue;
+      // Only skip paths successfully handled in the main loop; stale pendingOps that
+      // returned early (missing local file, missing index entry) must not block pulls.
+      if (handled.has(path)) continue;
       if (change.removed) {
         const localFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
         if (localFile) {
