@@ -81,6 +81,37 @@ export class Syncer {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
         driveChanged.set(localPath, { removed: c.removed, mtime: c.file?.modifiedTime });
+      } else if (!c.removed) {
+        // File exists on Drive but not in local index — resolve its path via API
+        try {
+          const meta = await this.drive.getFileMeta(c.fileId);
+          if (meta.mimeType === 'application/vnd.google-apps.folder') continue;
+          const parentId = meta.parents?.[0];
+          let resolvedPath: string | null = null;
+          if (parentId === this.settings.vaultRootId) {
+            resolvedPath = meta.name;
+          } else if (parentId) {
+            const parentLocalPath = driveIdToPath.get(parentId);
+            if (parentLocalPath) {
+              resolvedPath = `${parentLocalPath}/${meta.name}`;
+            }
+          }
+          if (resolvedPath) {
+            this.index.set(resolvedPath, {
+              driveId: c.fileId,
+              driveMtime: meta.modifiedTime,
+              syncedAt: Date.now(),
+              isFolder: false,
+            });
+            driveIdToPath.set(c.fileId, resolvedPath);
+            driveChanged.set(resolvedPath, { removed: false, mtime: meta.modifiedTime });
+          } else {
+            console.warn(`[NeoGDSync] Unknown Drive file ${c.fileId} ("${meta.name}"): parent ${parentId} not in index, skipping`);
+          }
+        } catch (err: unknown) {
+          console.warn(`[NeoGDSync] Could not resolve unknown Drive file ${c.fileId}:`,
+            err instanceof Error ? err.message : String(err));
+        }
       }
     }
 
@@ -215,15 +246,25 @@ export class Syncer {
   private async handleConflict(path: string, driveMtime: string, result: SyncResult): Promise<void> {
     const entry = this.index.get(path);
     if (!entry) return;
-    const bytes = await this.drive.downloadFile(entry.driveId);
+
+    // Save local version as a conflict copy so the user can manually merge
     const ext = path.includes('.') ? path.slice(path.lastIndexOf('.')) : '';
     const base = ext ? path.slice(0, -ext.length) : path;
     const conflictPath = `${base}.conflict${ext}`;
-    await writeLocal(this.app, conflictPath, bytes);
     const localFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
     const localMtime = localFile instanceof TFile ? localFile.stat.mtime : 0;
+    if (localFile instanceof TFile) {
+      const localBytes = await this.app.vault.readBinary(localFile);
+      await writeLocal(this.app, conflictPath, localBytes);
+    }
+
+    // Drive version is authoritative — pull it to the canonical path
+    const driveBytes = await this.drive.downloadFile(entry.driveId);
+    await writeLocal(this.app, path, driveBytes);
+    this.index.set(path, { ...entry, driveMtime, syncedAt: Date.now() });
+
     result.conflicts.push({ localPath: path, localMtime, driveMtime, conflictCopyPath: conflictPath, detectedAt: Date.now() });
-    await this.handlePush(path, 'modify', result);
+    result.pulled.push(path);
   }
 
   private async pullNewFromDrive(
