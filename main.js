@@ -515,7 +515,7 @@ var Syncer = class {
   }
   // ── Smart Sync ─────────────────────────────────────────────────
   async smartSync() {
-    var _a;
+    var _a, _b;
     const result = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
     this.onProgress("Scanning local changes\u2026");
     const offlineDiff = this.snapshot.computeDiff((p) => this.exclude(p));
@@ -548,6 +548,42 @@ var Syncer = class {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
         driveChanged.set(localPath, { removed: c.removed, mtime: (_a = c.file) == null ? void 0 : _a.modifiedTime });
+      }
+    }
+    // Bug fix: resolve Drive changes whose fileId is not yet in the local index.
+    // This happens when a device's index is stale (e.g. after reinstall or rebuild),
+    // causing new files from other devices to be silently dropped every sync.
+    const FOLDER_MIME2 = "application/vnd.google-apps.folder";
+    const unknownChanges = changes.filter((c) => !driveIdToPath.has(c.fileId) && !c.removed);
+    if (unknownChanges.length > 0) {
+      const folderIdToPath = /* @__PURE__ */ new Map();
+      folderIdToPath.set(this.settings.vaultRootId, "");
+      for (const p of this.index.allPaths()) {
+        const e = this.index.get(p);
+        if (e == null ? void 0 : e.isFolder) folderIdToPath.set(e.driveId, p);
+      }
+      for (const c of unknownChanges) {
+        try {
+          const meta = await this.drive.getFileMeta(c.fileId);
+          if (meta.mimeType === FOLDER_MIME2) continue;
+          const parentId = (_b = meta.parents) == null ? void 0 : _b[0];
+          if (!parentId) {
+            console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}) has no parent, skipping`);
+            continue;
+          }
+          const folderPath = folderIdToPath.get(parentId);
+          if (folderPath === void 0) {
+            console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}): parent folder ${parentId} not in index — run Rebuild Index to repair`);
+            continue;
+          }
+          const localPath = folderPath ? `${folderPath}/${meta.name}` : meta.name;
+          if (this.exclude(localPath)) continue;
+          this.index.set(localPath, { driveId: c.fileId, driveMtime: meta.modifiedTime, syncedAt: 0, isFolder: false });
+          driveIdToPath.set(c.fileId, localPath);
+          driveChanged.set(localPath, { removed: false, mtime: meta.modifiedTime });
+        } catch (err) {
+          console.warn(`[NeoGDSync] Could not resolve unknown fileId ${c.fileId}:`, err instanceof Error ? err.message : String(err));
+        }
       }
     }
     const allOps = Object.entries(this.pendingOps);
@@ -674,15 +710,23 @@ var Syncer = class {
   async handleConflict(path, driveMtime, result) {
     const entry = this.index.get(path);
     if (!entry) return;
-    const bytes = await this.drive.downloadFile(entry.driveId);
+    // Bug fix: conflict direction was reversed — local was pushed to Drive, overwriting
+    // the remote (newer) version. Correct behaviour: keep Drive version as authoritative,
+    // save local offline edits as a .conflict copy for the user to review and merge.
     const ext = path.includes(".") ? path.slice(path.lastIndexOf(".")) : "";
     const base = ext ? path.slice(0, -ext.length) : path;
     const conflictPath = `${base}.conflict${ext}`;
-    await writeLocal(this.app, conflictPath, bytes);
     const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
     const localMtime = localFile instanceof import_obsidian4.TFile ? localFile.stat.mtime : 0;
+    if (localFile instanceof import_obsidian4.TFile) {
+      const localBytes = await this.app.vault.readBinary(localFile);
+      await writeLocal(this.app, conflictPath, localBytes);
+    }
+    const driveBytes = await this.drive.downloadFile(entry.driveId);
+    await writeLocal(this.app, path, driveBytes);
+    this.index.set(path, { ...entry, driveMtime, syncedAt: Date.now() });
     result.conflicts.push({ localPath: path, localMtime, driveMtime, conflictCopyPath: conflictPath, detectedAt: Date.now() });
-    await this.handlePush(path, "modify", result);
+    result.pulled.push(path);
   }
   async pullNewFromDrive(driveChanged, result) {
     for (const [path, change] of driveChanged.entries()) {

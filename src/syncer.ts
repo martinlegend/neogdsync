@@ -84,6 +84,51 @@ export class Syncer {
       }
     }
 
+    // Bug fix: resolve Drive changes whose fileId is not yet in the local index.
+    // This happens when a device's index is stale (e.g. after reinstall or rebuild),
+    // causing new files from other devices to be silently dropped every sync.
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    const unknownChanges = changes.filter(c => !driveIdToPath.has(c.fileId) && !c.removed);
+    if (unknownChanges.length > 0) {
+      // Build reverse map: driveId → localPath for all known folders (+ vault root)
+      const folderIdToPath = new Map<string, string>();
+      folderIdToPath.set(this.settings.vaultRootId, '');
+      for (const p of this.index.allPaths()) {
+        const e = this.index.get(p);
+        if (e?.isFolder) folderIdToPath.set(e.driveId, p);
+      }
+      for (const c of unknownChanges) {
+        try {
+          const meta = await this.drive.getFileMeta(c.fileId);
+          if (meta.mimeType === FOLDER_MIME) continue;
+          const parentId = meta.parents?.[0];
+          if (!parentId) {
+            console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}) has no parent, skipping`);
+            continue;
+          }
+          const folderPath = folderIdToPath.get(parentId);
+          if (folderPath === undefined) {
+            console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}): parent folder ${parentId} not in index — run Rebuild Index to repair`);
+            continue;
+          }
+          const localPath = folderPath ? `${folderPath}/${meta.name}` : meta.name;
+          if (this.exclude(localPath)) continue;
+          // Pre-populate index so pullNewFromDrive can download this file
+          this.index.set(localPath, {
+            driveId: c.fileId,
+            driveMtime: meta.modifiedTime,
+            syncedAt: 0,
+            isFolder: false,
+          });
+          driveIdToPath.set(c.fileId, localPath);
+          driveChanged.set(localPath, { removed: false, mtime: meta.modifiedTime });
+        } catch (err: unknown) {
+          console.warn(`[NeoGDSync] Could not resolve unknown fileId ${c.fileId}:`,
+            err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+
     const allOps = Object.entries(this.pendingOps);
     let done = 0;
     for (const [path, op] of allOps) {
@@ -215,15 +260,29 @@ export class Syncer {
   private async handleConflict(path: string, driveMtime: string, result: SyncResult): Promise<void> {
     const entry = this.index.get(path);
     if (!entry) return;
-    const bytes = await this.drive.downloadFile(entry.driveId);
+
+    // Bug fix: conflict direction was reversed — local was pushed to Drive, overwriting
+    // the remote (newer) version. Correct behaviour: keep Drive version as authoritative,
+    // save local offline edits as a .conflict copy for the user to review and merge.
     const ext = path.includes('.') ? path.slice(path.lastIndexOf('.')) : '';
     const base = ext ? path.slice(0, -ext.length) : path;
     const conflictPath = `${base}.conflict${ext}`;
-    await writeLocal(this.app, conflictPath, bytes);
+
+    // 1. Save local offline edits as the conflict copy
     const localFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
     const localMtime = localFile instanceof TFile ? localFile.stat.mtime : 0;
+    if (localFile instanceof TFile) {
+      const localBytes = await this.app.vault.readBinary(localFile);
+      await writeLocal(this.app, conflictPath, localBytes);
+    }
+
+    // 2. Pull the Drive version as the canonical local file (no push to Drive)
+    const driveBytes = await this.drive.downloadFile(entry.driveId);
+    await writeLocal(this.app, path, driveBytes);
+    this.index.set(path, { ...entry, driveMtime, syncedAt: Date.now() });
+
     result.conflicts.push({ localPath: path, localMtime, driveMtime, conflictCopyPath: conflictPath, detectedAt: Date.now() });
-    await this.handlePush(path, 'modify', result);
+    result.pulled.push(path);
   }
 
   private async pullNewFromDrive(
