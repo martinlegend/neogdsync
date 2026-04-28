@@ -125,7 +125,15 @@ export class DriveApi {
   }
 
   async deleteFile(driveId: string): Promise<void> {
-    await this.request('DELETE', `${BASE}/files/${driveId}`);
+    // Bug fix: previously used HTTP DELETE which is permanent and bypasses Drive trash,
+    // making accidental local deletions unrecoverable. PATCH trashed=true instead so the
+    // user has ~30 days to restore from Drive trash.
+    await this.request(
+      'PATCH',
+      `${BASE}/files/${driveId}?fields=id`,
+      JSON.stringify({ trashed: true }),
+      { 'Content-Type': 'application/json' },
+    );
   }
 
   async downloadFile(driveId: string): Promise<ArrayBuffer> {
@@ -134,7 +142,9 @@ export class DriveApi {
   }
 
   async getFileMeta(driveId: string): Promise<DriveFileInfo> {
-    const resp = await this.request('GET', `${BASE}/files/${driveId}?fields=id,name,mimeType,modifiedTime,parents,size`);
+    // `trashed` field added so callers can detect files that have been moved to Drive trash
+    // (see syncer.ts unknownChanges: a stale "modified" event must not resurrect a trashed file).
+    const resp = await this.request('GET', `${BASE}/files/${driveId}?fields=id,name,mimeType,modifiedTime,parents,size,trashed`);
     return resp.json as DriveFileInfo;
   }
 
@@ -146,7 +156,7 @@ export class DriveApi {
         pageToken: token,
         pageSize: '1000',
         includeRemoved: 'true',
-        fields: 'nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime))',
+        fields: 'nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,trashed))',
       });
       const resp = await this.request('GET', `${BASE}/changes?${params}`);
       const data = resp.json as {

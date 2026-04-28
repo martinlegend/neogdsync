@@ -59,6 +59,7 @@ export interface DriveFileInfo {
   modifiedTime: string;
   parents?: string[];
   size?: string;
+  trashed?: boolean;
 }
 
 // Shape of a single item in the Drive Changes API response
@@ -70,6 +71,7 @@ export interface DriveChange {
     name: string;
     mimeType: string;
     modifiedTime: string;
+    trashed?: boolean;
   };
 }
 

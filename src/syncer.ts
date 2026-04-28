@@ -88,7 +88,12 @@ export class Syncer {
     // This happens when a device's index is stale (e.g. after reinstall or rebuild),
     // causing new files from other devices to be silently dropped every sync.
     const FOLDER_MIME = 'application/vnd.google-apps.folder';
-    const unknownChanges = changes.filter(c => !driveIdToPath.has(c.fileId) && !c.removed);
+    // Skip changes whose embedded file metadata already shows trashed=true. Without this,
+    // a stale "modified" event from before the trash event would walk the unknown-changes
+    // path below and resurrect the file locally even though Drive's current state is trashed.
+    const unknownChanges = changes.filter(
+      c => !driveIdToPath.has(c.fileId) && !c.removed && !(c.file?.trashed),
+    );
     if (unknownChanges.length > 0) {
       // Build reverse map: driveId → localPath for all known folders (+ vault root)
       const folderIdToPath = new Map<string, string>();
@@ -100,6 +105,9 @@ export class Syncer {
       for (const c of unknownChanges) {
         try {
           const meta = await this.drive.getFileMeta(c.fileId);
+          // Defence-in-depth: even if the change event lacked `trashed`, the live metadata
+          // may report it. Never resurrect a file that is currently in Drive trash.
+          if (meta.trashed) continue;
           if (meta.mimeType === FOLDER_MIME) continue;
           const parentId = meta.parents?.[0];
           if (!parentId) {
