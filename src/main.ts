@@ -6,7 +6,7 @@ import { NeoSettings, DEFAULT_SETTINGS, PendingOps, ConflictRecord, Snapshot } f
 import { DriveApi } from './driveApi';
 import { PathIndex } from './pathIndex';
 import { VaultSnapshot } from './snapshot';
-import { Syncer, SyncResult } from './syncer';
+import { Syncer, SyncResult, normFolder } from './syncer';
 import { clearTokenCache } from './auth';
 
 export default class NeoGDSync extends Plugin {
@@ -175,13 +175,14 @@ export default class NeoGDSync extends Plugin {
 
   // ── Sync ───────────────────────────────────────────────────────
 
-  async runSync(mode: 'smart' | 'push' | 'pull') {
+  async runSync(mode: 'smart' | 'push' | 'pull', folderFilter?: string) {
     if (this.syncing) { new Notice('Sync already in progress'); return; }
     if (!this.settings.refreshToken) { new Notice('No refresh token configured'); return; }
 
+    const folder = folderFilter ? normFolder(folderFilter) : undefined;
     this.syncing = true;
     this.updateStatus('Syncing…');
-    const notice = new Notice('Sync started…', 0);
+    const notice = new Notice(folder ? `Sync ${folder}…` : 'Sync started…', 0);
 
     try {
       const syncer = new Syncer(
@@ -191,8 +192,8 @@ export default class NeoGDSync extends Plugin {
       );
 
       let result: SyncResult;
-      if (mode === 'push') result = await syncer.forcePush();
-      else if (mode === 'pull') result = await syncer.forcePull();
+      if (mode === 'push') result = await syncer.forcePush(folder);
+      else if (mode === 'pull') result = await syncer.forcePull(folder);
       else result = await syncer.smartSync();
 
       this.conflicts.push(...result.conflicts);
@@ -313,10 +314,22 @@ class SyncModal extends Modal {
       if (pending > 20) ul.createEl('li', { text: `… and ${pending - 20} more` });
     }
 
+    // Folder filter input
+    const filterRow = contentEl.createDiv({ cls: 'neogdsync-filter-row' });
+    filterRow.createEl('label', { text: 'Folder (optional): ', attr: { for: 'neogdsync-folder-input' } });
+    const folderInput = filterRow.createEl('input', {
+      attr: { id: 'neogdsync-folder-input', type: 'text', placeholder: 'e.g. 2026/2026-04' },
+    });
+    folderInput.style.width = '100%';
+    folderInput.style.marginTop = '4px';
+    folderInput.style.fontFamily = 'monospace';
+
+    const getFolder = () => folderInput.value.trim() || undefined;
+
     const btnRow = contentEl.createDiv({ cls: 'neogdsync-btn-row' });
     btnRow.createEl('button', { text: 'Smart sync' }).onclick  = () => { this.close(); void this.plugin.runSync('smart'); };
-    btnRow.createEl('button', { text: 'Force push' }).onclick   = () => { this.close(); void this.plugin.runSync('push'); };
-    btnRow.createEl('button', { text: 'Force pull' }).onclick   = () => { this.close(); void this.plugin.runSync('pull'); };
+    btnRow.createEl('button', { text: 'Force push' }).onclick   = () => { this.close(); void this.plugin.runSync('push', getFolder()); };
+    btnRow.createEl('button', { text: 'Force pull' }).onclick   = () => { this.close(); void this.plugin.runSync('pull', getFolder()); };
     if (this.plugin.conflicts.length > 0) {
       btnRow.createEl('button', { text: `${this.plugin.conflicts.length} conflicts` })
         .onclick = () => { this.close(); this.plugin.showConflicts(); };

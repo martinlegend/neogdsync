@@ -162,6 +162,53 @@ export class PathIndex {
     await this.save();
   }
 
+  /**
+   * Partial rebuild: re-crawl one folder subtree on Drive without touching the rest of the index.
+   * Stale entries under the prefix are removed; entries outside are untouched.
+   * Returns false if the Drive folder cannot be located (no creation attempted).
+   */
+  async rebuildFolder(folderPath: string, onProgress?: (msg: string) => void): Promise<boolean> {
+    // Resolve Drive folder ID — prefer index, then navigate read-only.
+    const cached = this.index[folderPath];
+    let folderId: string | null = cached?.isFolder ? cached.driveId : null;
+    if (!folderId) {
+      folderId = await this.lookupFolderOnDrive(folderPath);
+      if (!folderId) return false;
+      this.set(folderPath, { driveId: folderId, driveMtime: new Date().toISOString(), syncedAt: Date.now(), isFolder: true });
+    }
+
+    // Remove stale file entries under this prefix (keep the folder entry itself).
+    const prefix = folderPath + '/';
+    for (const key of Object.keys(this.index)) {
+      if (key.startsWith(prefix)) {
+        delete this.index[key];
+        this.dirty = true;
+      }
+    }
+
+    await this.crawl(folderId, folderPath, onProgress);
+    this.dirty = true;
+    await this.save();
+    return true;
+  }
+
+  /** Navigate to a folder read-only (no creation). Returns Drive folder ID or null. */
+  private async lookupFolderOnDrive(localPath: string): Promise<string | null> {
+    const parts = localPath.split('/');
+    let currentId = this.vaultRootId;
+    let builtPath = '';
+    for (const part of parts) {
+      builtPath = builtPath ? `${builtPath}/${part}` : part;
+      const cached = this.index[builtPath];
+      if (cached?.isFolder) { currentId = cached.driveId; continue; }
+      const children = await this.drive.listChildren(currentId);
+      const found = children.find(c => c.name === part && c.mimeType === FOLDER_MIME);
+      if (!found) return null;
+      currentId = found.id;
+    }
+    return currentId;
+  }
+
   private async crawl(folderId: string, prefix: string, onProgress?: (msg: string) => void): Promise<void> {
     const children = await this.drive.listChildren(folderId);
     for (const child of children) {

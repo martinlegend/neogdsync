@@ -180,9 +180,18 @@ export class Syncer {
 
   // ── Force Push ─────────────────────────────────────────────────
 
-  async forcePush(): Promise<SyncResult> {
+  async forcePush(folderFilter?: string): Promise<SyncResult> {
     const result: SyncResult = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    const allOps = Object.entries(this.pendingOps);
+    const prefix = folderFilter ? normFolder(folderFilter) : undefined;
+
+    // Merge offline diff first so freshly-modified files aren't missed.
+    const offlineDiff = this.snapshot.computeDiff(p => this.exclude(p));
+    for (const [path, op] of Object.entries(offlineDiff)) {
+      if (!this.pendingOps[path]) this.pendingOps[path] = op;
+    }
+
+    const allOps = Object.entries(this.pendingOps)
+      .filter(([path]) => !prefix || matchesFolder(path, prefix));
     let done = 0;
     for (const [path, op] of allOps) {
       this.onProgress(`[${++done}/${allOps.length}] push: ${path}`);
@@ -208,11 +217,24 @@ export class Syncer {
 
   // ── Force Pull ─────────────────────────────────────────────────
 
-  async forcePull(): Promise<SyncResult> {
+  async forcePull(folderFilter?: string): Promise<SyncResult> {
     const result: SyncResult = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    this.onProgress('Rebuilding drive index…');
-    await this.index.rebuild(msg => this.onProgress(`Crawling: ${msg}`));
-    const paths = this.index.allPaths();
+    const prefix = folderFilter ? normFolder(folderFilter) : undefined;
+
+    if (prefix) {
+      this.onProgress(`Rebuilding index for ${prefix}…`);
+      const found = await this.index.rebuildFolder(prefix, msg => this.onProgress(`Crawling: ${msg}`));
+      if (!found) {
+        result.errors.push({ path: prefix, error: `Folder not found on Drive: ${prefix}` });
+        return result;
+      }
+    } else {
+      this.onProgress('Rebuilding drive index…');
+      await this.index.rebuild(msg => this.onProgress(`Crawling: ${msg}`));
+    }
+
+    const paths = this.index.allPaths()
+      .filter(p => !prefix || matchesFolder(p, prefix));
     let done = 0;
     for (const path of paths) {
       const entry = this.index.get(path);
@@ -346,6 +368,16 @@ async function writeLocal(app: App, path: string, bytes: ArrayBuffer): Promise<v
   } else {
     await app.vault.createBinary(norm, bytes);
   }
+}
+
+// ── Folder filter helpers ──────────────────────────────────────
+
+export function normFolder(p: string): string {
+  return p.replace(/^\/+|\/+$/g, '');
+}
+
+export function matchesFolder(filePath: string, folder: string): boolean {
+  return filePath === folder || filePath.startsWith(folder + '/');
 }
 
 // ── Glob matching ──────────────────────────────────────────────

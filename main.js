@@ -369,6 +369,50 @@ var PathIndex = class {
     this.dirty = true;
     await this.save();
   }
+  /**
+   * Partial rebuild: re-crawl one folder subtree on Drive without touching the rest of the index.
+   * Stale entries under the prefix are removed; entries outside are untouched.
+   * Returns false if the Drive folder cannot be located (no creation attempted).
+   */
+  async rebuildFolder(folderPath, onProgress) {
+    const cached2 = this.index[folderPath];
+    let folderId = (cached2 == null ? void 0 : cached2.isFolder) ? cached2.driveId : null;
+    if (!folderId) {
+      folderId = await this.lookupFolderOnDrive(folderPath);
+      if (!folderId) return false;
+      this.set(folderPath, { driveId: folderId, driveMtime: (/* @__PURE__ */ new Date()).toISOString(), syncedAt: Date.now(), isFolder: true });
+    }
+    const prefix = folderPath + "/";
+    for (const key of Object.keys(this.index)) {
+      if (key.startsWith(prefix)) {
+        delete this.index[key];
+        this.dirty = true;
+      }
+    }
+    await this.crawl(folderId, folderPath, onProgress);
+    this.dirty = true;
+    await this.save();
+    return true;
+  }
+  /** Navigate to a folder read-only (no creation). Returns Drive folder ID or null. */
+  async lookupFolderOnDrive(localPath) {
+    const parts = localPath.split("/");
+    let currentId = this.vaultRootId;
+    let builtPath = "";
+    for (const part of parts) {
+      builtPath = builtPath ? `${builtPath}/${part}` : part;
+      const cached2 = this.index[builtPath];
+      if (cached2 == null ? void 0 : cached2.isFolder) {
+        currentId = cached2.driveId;
+        continue;
+      }
+      const children = await this.drive.listChildren(currentId);
+      const found = children.find((c) => c.name === part && c.mimeType === FOLDER_MIME2);
+      if (!found) return null;
+      currentId = found.id;
+    }
+    return currentId;
+  }
   async crawl(folderId, prefix, onProgress) {
     const children = await this.drive.listChildren(folderId);
     for (const child of children) {
@@ -636,9 +680,14 @@ var Syncer = class {
     return result;
   }
   // ── Force Push ─────────────────────────────────────────────────
-  async forcePush() {
+  async forcePush(folderFilter) {
     const result = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    const allOps = Object.entries(this.pendingOps);
+    const prefix = folderFilter ? normFolder(folderFilter) : void 0;
+    const offlineDiff = this.snapshot.computeDiff((p) => this.exclude(p));
+    for (const [path, op] of Object.entries(offlineDiff)) {
+      if (!this.pendingOps[path]) this.pendingOps[path] = op;
+    }
+    const allOps = Object.entries(this.pendingOps).filter(([path]) => !prefix || matchesFolder(path, prefix));
     let done = 0;
     for (const [path, op] of allOps) {
       this.onProgress(`[${++done}/${allOps.length}] push: ${path}`);
@@ -662,11 +711,21 @@ var Syncer = class {
     return result;
   }
   // ── Force Pull ─────────────────────────────────────────────────
-  async forcePull() {
+  async forcePull(folderFilter) {
     const result = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
-    this.onProgress("Rebuilding drive index\u2026");
-    await this.index.rebuild((msg) => this.onProgress(`Crawling: ${msg}`));
-    const paths = this.index.allPaths();
+    const prefix = folderFilter ? normFolder(folderFilter) : void 0;
+    if (prefix) {
+      this.onProgress(`Rebuilding index for ${prefix}\u2026`);
+      const found = await this.index.rebuildFolder(prefix, (msg) => this.onProgress(`Crawling: ${msg}`));
+      if (!found) {
+        result.errors.push({ path: prefix, error: `Folder not found on Drive: ${prefix}` });
+        return result;
+      }
+    } else {
+      this.onProgress("Rebuilding drive index\u2026");
+      await this.index.rebuild((msg) => this.onProgress(`Crawling: ${msg}`));
+    }
+    const paths = this.index.allPaths().filter((p) => !prefix || matchesFolder(p, prefix));
     let done = 0;
     for (const path of paths) {
       const entry = this.index.get(path);
@@ -785,6 +844,12 @@ async function writeLocal(app, path, bytes) {
   } else {
     await app.vault.createBinary(norm, bytes);
   }
+}
+function normFolder(p) {
+  return p.replace(/^\/+|\/+$/g, "");
+}
+function matchesFolder(filePath, folder) {
+  return filePath === folder || filePath.startsWith(folder + "/");
 }
 function matchGlob(pattern, path) {
   let r = "";
@@ -943,7 +1008,7 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     this.updateStatus();
   }
   // ── Sync ───────────────────────────────────────────────────────
-  async runSync(mode) {
+  async runSync(mode, folderFilter) {
     if (this.syncing) {
       new import_obsidian5.Notice("Sync already in progress");
       return;
@@ -952,9 +1017,10 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       new import_obsidian5.Notice("No refresh token configured");
       return;
     }
+    const folder = folderFilter ? normFolder(folderFilter) : void 0;
     this.syncing = true;
     this.updateStatus("Syncing\u2026");
-    const notice = new import_obsidian5.Notice("Sync started\u2026", 0);
+    const notice = new import_obsidian5.Notice(folder ? `Sync ${folder}\u2026` : "Sync started\u2026", 0);
     try {
       const syncer = new Syncer(
         this.app,
@@ -968,8 +1034,8 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
         }
       );
       let result;
-      if (mode === "push") result = await syncer.forcePush();
-      else if (mode === "pull") result = await syncer.forcePull();
+      if (mode === "push") result = await syncer.forcePush(folder);
+      else if (mode === "pull") result = await syncer.forcePull(folder);
       else result = await syncer.smartSync();
       this.conflicts.push(...result.conflicts);
       this.settings.lastSyncedAt = Date.now();
@@ -1076,6 +1142,15 @@ var SyncModal = class extends import_obsidian5.Modal {
       }
       if (pending > 20) ul.createEl("li", { text: `\u2026 and ${pending - 20} more` });
     }
+    const filterRow = contentEl.createDiv({ cls: "neogdsync-filter-row" });
+    filterRow.createEl("label", { text: "Folder (optional): ", attr: { for: "neogdsync-folder-input" } });
+    const folderInput = filterRow.createEl("input", {
+      attr: { id: "neogdsync-folder-input", type: "text", placeholder: "e.g. 2026/2026-04" }
+    });
+    folderInput.style.width = "100%";
+    folderInput.style.marginTop = "4px";
+    folderInput.style.fontFamily = "monospace";
+    const getFolder = () => folderInput.value.trim() || void 0;
     const btnRow = contentEl.createDiv({ cls: "neogdsync-btn-row" });
     btnRow.createEl("button", { text: "Smart sync" }).onclick = () => {
       this.close();
@@ -1083,11 +1158,11 @@ var SyncModal = class extends import_obsidian5.Modal {
     };
     btnRow.createEl("button", { text: "Force push" }).onclick = () => {
       this.close();
-      void this.plugin.runSync("push");
+      void this.plugin.runSync("push", getFolder());
     };
     btnRow.createEl("button", { text: "Force pull" }).onclick = () => {
       this.close();
-      void this.plugin.runSync("pull");
+      void this.plugin.runSync("pull", getFolder());
     };
     if (this.plugin.conflicts.length > 0) {
       btnRow.createEl("button", { text: `${this.plugin.conflicts.length} conflicts` }).onclick = () => {
