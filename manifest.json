@@ -1,9 +1,9 @@
 {
   "id": "neogdsync",
   "name": "NeoGDSync",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "minAppVersion": "1.6.0",
-  "description": "Lightweight Google Drive sync with path-based index, conflict detection, and Smart/Push/Pull modes.",
+  "description": "Lightweight Google Drive sync with path-based index, conflict detection, and smart/push/pull modes.",
   "author": "LM",
   "authorUrl": "",
   "isDesktopOnly": false
