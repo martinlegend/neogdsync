@@ -80,7 +80,7 @@ export class Syncer {
     for (const c of changes) {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
-        driveChanged.set(localPath, { removed: c.removed, mtime: c.file?.modifiedTime });
+        driveChanged.set(localPath, { removed: c.removed || c.file?.trashed === true, mtime: c.file?.modifiedTime });
       }
     }
 
@@ -267,6 +267,16 @@ export class Syncer {
     const mimeType = mime.fromPath(path);
     const cached = this.index.get(path);
     if (cached && !cached.isFolder) {
+      // Cross-folder rename: 'create' op + existing driveId means index.rename already ran.
+      // Drive.updateFile only updates content — we must also move the file to the new parent.
+      if (op === 'create') {
+        const targetParentId = await this.index.resolveParentFolder(path);
+        const meta = await this.drive.getFileMeta(cached.driveId);
+        const currentParentId = meta.parents?.[0];
+        if (currentParentId && currentParentId !== targetParentId) {
+          await this.drive.moveFile(cached.driveId, currentParentId, targetParentId);
+        }
+      }
       await this.drive.updateFile(cached.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached, driveMtime: mtime, syncedAt: Date.now() });
     } else {
@@ -282,10 +292,16 @@ export class Syncer {
   private async handleDelete(path: string, result: SyncResult): Promise<void> {
     const cached = this.index.get(path);
     if (cached) {
-      try { await this.drive.deleteFile(cached.driveId); } catch { /* already gone */ }
-      this.index.delete(path);
+      try {
+        await this.drive.deleteFile(cached.driveId);
+        this.index.delete(path);
+        result.deleted.push(path);
+      } catch (err: unknown) {
+        result.errors.push({ path, error: `Drive delete failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    } else {
+      result.deleted.push(path);
     }
-    result.deleted.push(path);
   }
 
   private async handleConflict(path: string, driveMtime: string, result: SyncResult): Promise<void> {

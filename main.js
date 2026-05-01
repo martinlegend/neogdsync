@@ -158,6 +158,10 @@ var DriveApi = class {
     const { id } = resp.json;
     return id;
   }
+  async moveFile(driveId, oldParentId, newParentId) {
+    const params = new URLSearchParams({ addParents: newParentId, removeParents: oldParentId, fields: "id" });
+    await this.request("PATCH", `${BASE}/files/${driveId}?${params}`);
+  }
   async renameFile(driveId, newName) {
     await this.request(
       "PATCH",
@@ -191,7 +195,7 @@ var DriveApi = class {
         pageToken: token,
         pageSize: "1000",
         includeRemoved: "true",
-        fields: "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,trashed))"
+        fields: "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,size,trashed))"
       });
       const resp = await this.request("GET", `${BASE}/changes?${params}`);
       const data = resp.json;
@@ -756,6 +760,14 @@ var Syncer = class {
     const mimeType = fromPath(path);
     const cached2 = this.index.get(path);
     if (cached2 && !cached2.isFolder) {
+      if (op === "create") {
+        const targetParentId = await this.index.resolveParentFolder(path);
+        const meta = await this.drive.getFileMeta(cached2.driveId);
+        const currentParentId = meta.parents?.[0];
+        if (currentParentId && currentParentId !== targetParentId) {
+          await this.drive.moveFile(cached2.driveId, currentParentId, targetParentId);
+        }
+      }
       await this.drive.updateFile(cached2.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached2, driveMtime: mtime, syncedAt: Date.now() });
     } else {
@@ -777,11 +789,14 @@ var Syncer = class {
     if (cached2) {
       try {
         await this.drive.deleteFile(cached2.driveId);
-      } catch (e) {
+        this.index.delete(path);
+        result.deleted.push(path);
+      } catch (err) {
+        result.errors.push({ path, error: `Drive delete failed: ${err instanceof Error ? err.message : String(err)}` });
       }
-      this.index.delete(path);
+    } else {
+      result.deleted.push(path);
     }
-    result.deleted.push(path);
   }
   async handleConflict(path, driveMtime, result) {
     const entry = this.index.get(path);

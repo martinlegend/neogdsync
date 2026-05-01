@@ -115,6 +115,11 @@ export class DriveApi {
     return id;
   }
 
+  async moveFile(driveId: string, oldParentId: string, newParentId: string): Promise<void> {
+    const params = new URLSearchParams({ addParents: newParentId, removeParents: oldParentId, fields: 'id' });
+    await this.request('PATCH', `${BASE}/files/${driveId}?${params}`);
+  }
+
   async renameFile(driveId: string, newName: string): Promise<void> {
     await this.request(
       'PATCH',
@@ -156,7 +161,7 @@ export class DriveApi {
         pageToken: token,
         pageSize: '1000',
         includeRemoved: 'true',
-        fields: 'nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,trashed))',
+        fields: 'nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,size,trashed))',
       });
       const resp = await this.request('GET', `${BASE}/changes?${params}`);
       const data = resp.json as {

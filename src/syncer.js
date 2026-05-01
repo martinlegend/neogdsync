@@ -182,6 +182,14 @@ export class Syncer {
         const mimeType = mime.fromPath(path);
         const cached = this.index.get(path);
         if (cached && !cached.isFolder) {
+            if (op === 'create') {
+                const targetParentId = await this.index.resolveParentFolder(path);
+                const meta = await this.drive.getFileMeta(cached.driveId);
+                const currentParentId = meta.parents?.[0];
+                if (currentParentId && currentParentId !== targetParentId) {
+                    await this.drive.moveFile(cached.driveId, currentParentId, targetParentId);
+                }
+            }
             await this.drive.updateFile(cached.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
             this.index.set(path, { ...cached, driveMtime: mtime, syncedAt: Date.now() });
         }
@@ -197,11 +205,16 @@ export class Syncer {
         if (cached) {
             try {
                 await this.drive.deleteFile(cached.driveId);
+                this.index.delete(path);
+                result.deleted.push(path);
             }
-            catch ( /* already gone */_a) { /* already gone */ }
-            this.index.delete(path);
+            catch (err) {
+                result.errors.push({ path, error: `Drive delete failed: ${err instanceof Error ? err.message : String(err)}` });
+            }
         }
-        result.deleted.push(path);
+        else {
+            result.deleted.push(path);
+        }
     }
     async handleConflict(path, driveMtime, result) {
         const entry = this.index.get(path);
