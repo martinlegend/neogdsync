@@ -596,7 +596,7 @@ var Syncer = class {
     for (const c of changes) {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
-        driveChanged.set(localPath, { removed: c.removed, mtime: (_a = c.file) == null ? void 0 : _a.modifiedTime });
+        driveChanged.set(localPath, { removed: c.removed || c.file?.trashed === true, mtime: (_a = c.file) == null ? void 0 : _a.modifiedTime });
       }
     }
     const FOLDER_MIME3 = "application/vnd.google-apps.folder";
