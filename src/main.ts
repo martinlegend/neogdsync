@@ -318,11 +318,9 @@ class SyncModal extends Modal {
     const filterRow = contentEl.createDiv({ cls: 'neogdsync-filter-row' });
     filterRow.createEl('label', { text: 'Folder (optional): ', attr: { for: 'neogdsync-folder-input' } });
     const folderInput = filterRow.createEl('input', {
+      cls: 'neogdsync-folder-input',
       attr: { id: 'neogdsync-folder-input', type: 'text', placeholder: 'e.g. 2026/2026-04' },
     });
-    folderInput.style.width = '100%';
-    folderInput.style.marginTop = '4px';
-    folderInput.style.fontFamily = 'monospace';
 
     const getFolder = () => folderInput.value.trim() || undefined;
 
