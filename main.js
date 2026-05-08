@@ -568,7 +568,7 @@ var Syncer = class {
   }
   // ── Smart Sync ─────────────────────────────────────────────────
   async smartSync() {
-    var _a, _b;
+    var _a, _b, _c, _d;
     const result = { pushed: [], pulled: [], deleted: [], conflicts: [], errors: [] };
     this.onProgress("Scanning local changes\u2026");
     const offlineDiff = this.snapshot.computeDiff((p) => this.exclude(p));
@@ -600,7 +600,7 @@ var Syncer = class {
     for (const c of changes) {
       const localPath = driveIdToPath.get(c.fileId);
       if (localPath) {
-        driveChanged.set(localPath, { removed: c.removed || c.file?.trashed === true, mtime: (_a = c.file) == null ? void 0 : _a.modifiedTime });
+        driveChanged.set(localPath, { removed: c.removed || ((_a = c.file) == null ? void 0 : _a.trashed) === true, mtime: (_b = c.file) == null ? void 0 : _b.modifiedTime });
       }
     }
     const FOLDER_MIME3 = "application/vnd.google-apps.folder";
@@ -620,9 +620,33 @@ var Syncer = class {
       for (const c of unknownChanges) {
         try {
           const meta = await this.drive.getFileMeta(c.fileId);
+          if (meta.trashed || meta.mimeType !== FOLDER_MIME3) continue;
+          const parentId = (_c = meta.parents) == null ? void 0 : _c[0];
+          if (!parentId) continue;
+          const parentPath = folderIdToPath.get(parentId);
+          if (parentPath === void 0) continue;
+          const folderLocalPath = parentPath ? `${parentPath}/${meta.name}` : meta.name;
+          if (this.exclude(folderLocalPath)) continue;
+          folderIdToPath.set(c.fileId, folderLocalPath);
+          this.index.set(folderLocalPath, {
+            driveId: c.fileId,
+            driveMtime: meta.modifiedTime,
+            syncedAt: 0,
+            isFolder: true
+          });
+        } catch (err) {
+          console.warn(
+            `[NeoGDSync] Could not resolve unknown folder ${c.fileId}:`,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
+      }
+      for (const c of unknownChanges) {
+        try {
+          const meta = await this.drive.getFileMeta(c.fileId);
           if (meta.trashed) continue;
           if (meta.mimeType === FOLDER_MIME3) continue;
-          const parentId = (_b = meta.parents) == null ? void 0 : _b[0];
+          const parentId = (_d = meta.parents) == null ? void 0 : _d[0];
           if (!parentId) {
             console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}) has no parent, skipping`);
             continue;
@@ -753,6 +777,7 @@ var Syncer = class {
   }
   // ── Internal helpers ───────────────────────────────────────────
   async handlePush(path, op, result) {
+    var _a;
     const file = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
     if (!file || !(file instanceof import_obsidian4.TFile)) return;
     const bytes = await this.app.vault.readBinary(file);
@@ -763,7 +788,7 @@ var Syncer = class {
       if (op === "create") {
         const targetParentId = await this.index.resolveParentFolder(path);
         const meta = await this.drive.getFileMeta(cached2.driveId);
-        const currentParentId = meta.parents?.[0];
+        const currentParentId = (_a = meta.parents) == null ? void 0 : _a[0];
         if (currentParentId && currentParentId !== targetParentId) {
           await this.drive.moveFile(cached2.driveId, currentParentId, targetParentId);
         }
