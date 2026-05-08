@@ -102,6 +102,35 @@ export class Syncer {
         const e = this.index.get(p);
         if (e?.isFolder) folderIdToPath.set(e.driveId, p);
       }
+
+      // Pass 1: register new folders into folderIdToPath so that files inside them
+      // can be resolved in Pass 2. Without this, a file inside a newly-created folder
+      // always fails with "parent folder not in index" because the folder change is
+      // silently skipped before the file change is processed.
+      for (const c of unknownChanges) {
+        try {
+          const meta = await this.drive.getFileMeta(c.fileId);
+          if (meta.trashed || meta.mimeType !== FOLDER_MIME) continue;
+          const parentId = meta.parents?.[0];
+          if (!parentId) continue;
+          const parentPath = folderIdToPath.get(parentId);
+          if (parentPath === undefined) continue; // parent itself unknown; will warn in pass 2
+          const folderLocalPath = parentPath ? `${parentPath}/${meta.name}` : meta.name;
+          if (this.exclude(folderLocalPath)) continue;
+          folderIdToPath.set(c.fileId, folderLocalPath);
+          this.index.set(folderLocalPath, {
+            driveId: c.fileId,
+            driveMtime: meta.modifiedTime,
+            syncedAt: 0,
+            isFolder: true,
+          });
+        } catch (err: unknown) {
+          console.warn(`[NeoGDSync] Could not resolve unknown folder ${c.fileId}:`,
+            err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      // Pass 2: resolve files, now that new folders are in folderIdToPath
       for (const c of unknownChanges) {
         try {
           const meta = await this.drive.getFileMeta(c.fileId);
