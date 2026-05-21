@@ -779,7 +779,10 @@ var Syncer = class {
   async handlePush(path, op, result) {
     var _a;
     const file = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
-    if (!file || !(file instanceof import_obsidian4.TFile)) return;
+    if (!file || !(file instanceof import_obsidian4.TFile)) {
+      result.pushed.push(path);
+      return;
+    }
     const bytes = await this.app.vault.readBinary(file);
     const mtime = new Date(file.stat.mtime).toISOString();
     const mimeType = fromPath(path);
@@ -1004,6 +1007,12 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
   }
   handleRename(f, oldPath) {
     if (this.exclude(f.path) && this.exclude(oldPath)) return;
+    if (!(f instanceof import_obsidian5.TFile)) {
+      this.index.rename(oldPath, f.path);
+      this.updateStatus();
+      this.debouncedSave();
+      return;
+    }
     if (this.pendingOps[oldPath] === "create") {
       delete this.pendingOps[oldPath];
       this.pendingOps[f.path] = "create";

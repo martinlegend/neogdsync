@@ -125,6 +125,15 @@ export default class NeoGDSync extends Plugin {
 
   private handleRename(f: TAbstractFile, oldPath: string) {
     if (this.exclude(f.path) && this.exclude(oldPath)) return;
+    // Folders don't need an explicit push op — they're created on-demand by resolveParentFolder.
+    // Registering a folder rename as 'create' causes it to get stuck in pendingOps forever
+    // because handlePush early-returns on TFolder without clearing the entry.
+    if (!(f instanceof TFile)) {
+      this.index.rename(oldPath, f.path);
+      this.updateStatus();
+      this.debouncedSave();
+      return;
+    }
     if (this.pendingOps[oldPath] === 'create') {
       delete this.pendingOps[oldPath];
       this.pendingOps[f.path] = 'create';

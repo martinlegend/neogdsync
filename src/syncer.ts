@@ -290,7 +290,12 @@ export class Syncer {
 
   private async handlePush(path: string, op: 'create' | 'modify', result: SyncResult): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
-    if (!file || !(file instanceof TFile)) return;
+    if (!file || !(file instanceof TFile)) {
+      // Folder or missing file: clear the stuck op so it doesn't loop forever.
+      // Folders are created on-demand by resolveParentFolder; missing files have nothing to push.
+      result.pushed.push(path);
+      return;
+    }
     const bytes = await this.app.vault.readBinary(file);
     const mtime = new Date(file.stat.mtime).toISOString();
     const mimeType = mime.fromPath(path);
