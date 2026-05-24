@@ -1164,6 +1164,10 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     this.pendingOps = (_b = saved == null ? void 0 : saved.pendingOps) != null ? _b : {};
     this.conflicts = (_c = saved == null ? void 0 : saved.conflicts) != null ? _c : [];
     if (this.snapshot) this.snapshot.setRaw(saved == null ? void 0 : saved.snapshot);
+    if (this.settings.authProxyUrl === "https://ogd.richardxiong.com/api/access") {
+      this.settings.authProxyUrl = DEFAULT_SETTINGS.authProxyUrl;
+      await this.saveSettings();
+    }
   }
   async saveSettings() {
     await this.saveData({
