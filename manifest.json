@@ -1,7 +1,7 @@
 {
   "id": "neogdsync",
   "name": "NeoGDSync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.6.0",
   "description": "Lightweight Google Drive sync for Obsidian with path-based index, conflict detection, and smart/push/pull modes.",
   "author": "martinlegend",

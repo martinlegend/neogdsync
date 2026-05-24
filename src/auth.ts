@@ -4,7 +4,7 @@ import { requestUrl } from 'obsidian';
 
 // Self-hosted Cloudflare Worker proxy (oauth-proxy/worker.js).
 // Replace with your own workers.dev URL after deploying.
-export const DEFAULT_PROXY_URL = 'https://neogdsync-oauth.martinlegend.workers.dev';
+export const DEFAULT_PROXY_URL = 'https://neogdsync-oauth.neogdsync.workers.dev';
 
 export interface AccessToken {
   token: string;

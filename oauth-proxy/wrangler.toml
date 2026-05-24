@@ -1,10 +1,10 @@
 name = "neogdsync-oauth"
 main = "worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-05-01"
 
-# Free workers.dev subdomain — HTTPS included, no custom domain needed.
-# After deploy the URL will be: https://neogdsync-oauth.<your-subdomain>.workers.dev
+# Free workers.dev subdomain — HTTPS included automatically.
+# Deployed URL: https://neogdsync-oauth.<your-cf-subdomain>.workers.dev
 #
-# Secrets (set via CLI, never stored here):
-#   wrangler secret put GOOGLE_CLIENT_ID
-#   wrangler secret put GOOGLE_CLIENT_SECRET
+# Secrets (never stored here — inject via CLI):
+#   npx wrangler secret put GOOGLE_CLIENT_ID
+#   npx wrangler secret put GOOGLE_CLIENT_SECRET
