@@ -50,7 +50,7 @@ var import_obsidian2 = require("obsidian");
 
 // src/auth.ts
 var import_obsidian = require("obsidian");
-var DEFAULT_PROXY_URL = "https://ogd.richardxiong.com/api/access";
+var DEFAULT_PROXY_URL = "https://neogdsync-oauth.martinlegend.workers.dev";
 var cached = null;
 async function getAccessToken(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
   if (cached && Date.now() < cached.expiresAt - 6e4) {
