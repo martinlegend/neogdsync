@@ -293,8 +293,12 @@ export default class NeoGDSync extends Plugin {
     this.conflicts  = saved?.conflicts ?? [];
     if (this.snapshot) this.snapshot.setRaw(saved?.snapshot);
 
-    // Migrate: replace legacy third-party proxy URL with self-hosted Worker
-    if (this.settings.authProxyUrl === 'https://ogd.richardxiong.com/api/access') {
+    // Migrate: replace legacy proxy URLs with current self-hosted Worker
+    const legacyUrls = [
+      'https://ogd.richardxiong.com/api/access',
+      'https://neogdsync-oauth.neogdsync.workers.dev',
+    ];
+    if (legacyUrls.includes(this.settings.authProxyUrl)) {
       this.settings.authProxyUrl = DEFAULT_SETTINGS.authProxyUrl;
       await this.saveSettings();
     }

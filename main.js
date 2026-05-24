@@ -29,7 +29,7 @@ var import_obsidian5 = require("obsidian");
 var DEFAULT_SETTINGS = {
   refreshToken: "",
   vaultRootId: "",
-  authProxyUrl: "https://neogdsync-oauth.neogdsync.workers.dev",
+  authProxyUrl: "https://neogdsync-worker.neogdsync.workers.dev",
   lastSyncedAt: 0,
   changesToken: "",
   syncMode: "smart",
@@ -50,7 +50,7 @@ var import_obsidian2 = require("obsidian");
 
 // src/auth.ts
 var import_obsidian = require("obsidian");
-var DEFAULT_PROXY_URL = "https://neogdsync-oauth.neogdsync.workers.dev";
+var DEFAULT_PROXY_URL = "https://neogdsync-worker.neogdsync.workers.dev";
 var cached = null;
 async function getAccessToken(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
   if (cached && Date.now() < cached.expiresAt - 6e4) {
@@ -1164,7 +1164,11 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     this.pendingOps = (_b = saved == null ? void 0 : saved.pendingOps) != null ? _b : {};
     this.conflicts = (_c = saved == null ? void 0 : saved.conflicts) != null ? _c : [];
     if (this.snapshot) this.snapshot.setRaw(saved == null ? void 0 : saved.snapshot);
-    if (this.settings.authProxyUrl === "https://ogd.richardxiong.com/api/access") {
+    const legacyUrls = [
+      "https://ogd.richardxiong.com/api/access",
+      "https://neogdsync-oauth.neogdsync.workers.dev"
+    ];
+    if (legacyUrls.includes(this.settings.authProxyUrl)) {
       this.settings.authProxyUrl = DEFAULT_SETTINGS.authProxyUrl;
       await this.saveSettings();
     }
