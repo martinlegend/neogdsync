@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NeoGDSync — Privacy Policy</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 60px auto; padding: 0 24px; color: #24292f; line-height: 1.7; }
+    h1 { font-size: 1.8rem; border-bottom: 1px solid #d0d7de; padding-bottom: 12px; }
+    h2 { font-size: 1.15rem; margin-top: 2rem; }
+    a { color: #0969da; }
+    footer { margin-top: 48px; font-size: 0.85rem; color: #6e7781; }
+  </style>
+</head>
+<body>
+  <h1>NeoGDSync — Privacy Policy</h1>
+  <p><em>Last updated: May 2026</em></p>
+
+  <h2>What NeoGDSync does</h2>
+  <p>
+    NeoGDSync is an <a href="https://obsidian.md">Obsidian</a> plugin that syncs your vault files
+    with your own Google Drive account. All data stays between your device and your personal Google Drive —
+    nothing is sent to any third-party server.
+  </p>
+
+  <h2>Data we access</h2>
+  <ul>
+    <li>Your Google Drive files, limited to the vault folder you configure.</li>
+    <li>We request the <code>https://www.googleapis.com/auth/drive</code> scope to read, write, and delete files in your Drive.</li>
+  </ul>
+
+  <h2>Data we do NOT collect</h2>
+  <ul>
+    <li>We do not collect, store, or transmit your files or metadata to any server we operate.</li>
+    <li>We do not store your Google account information.</li>
+    <li>We do not use analytics or tracking of any kind.</li>
+  </ul>
+
+  <h2>OAuth proxy</h2>
+  <p>
+    NeoGDSync uses a lightweight Cloudflare Worker (<code>neogdsync-worker.neogdsync.workers.dev</code>)
+    as an OAuth proxy. Its sole function is to exchange your OAuth refresh token for a short-lived
+    access token using Google's token endpoint. The Worker does not log, store, or forward your tokens
+    or any other data. The Worker source code is publicly available in the
+    <a href="https://github.com/martinlegend/neogdsync/blob/main/oauth-proxy/worker.js">plugin repository</a>.
+  </p>
+
+  <h2>Your refresh token</h2>
+  <p>
+    Your Google Drive refresh token is stored locally in Obsidian's plugin data on your own device.
+    It is never uploaded anywhere except to Google's token endpoint (via the proxy above) to obtain
+    a fresh access token.
+  </p>
+
+  <h2>Third-party services</h2>
+  <p>
+    NeoGDSync communicates only with:
+  </p>
+  <ul>
+    <li><strong>Google Drive API</strong> — to sync your files.</li>
+    <li><strong>Google OAuth</strong> — to authenticate your account.</li>
+    <li><strong>NeoGDSync OAuth proxy</strong> (Cloudflare Worker) — to refresh access tokens without exposing the OAuth client secret in the plugin code.</li>
+  </ul>
+
+  <h2>Contact</h2>
+  <p>
+    If you have questions about this privacy policy, please open an issue on
+    <a href="https://github.com/martinlegend/neogdsync/issues">GitHub</a>.
+  </p>
+
+  <footer>NeoGDSync is open source. <a href="https://github.com/martinlegend/neogdsync">View on GitHub</a>.</footer>
+</body>
+</html>
