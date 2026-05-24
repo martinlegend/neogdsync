@@ -13,7 +13,7 @@ export interface NeoSettings {
 export const DEFAULT_SETTINGS: NeoSettings = {
   refreshToken: '',
   vaultRootId: '',
-  authProxyUrl: 'https://ogd.richardxiong.com/api/access',
+  authProxyUrl: 'https://neogdsync-oauth.neogdsync.workers.dev',
   lastSyncedAt: 0,
   changesToken: '',
   syncMode: 'smart',

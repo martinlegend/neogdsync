@@ -29,7 +29,7 @@ var import_obsidian5 = require("obsidian");
 var DEFAULT_SETTINGS = {
   refreshToken: "",
   vaultRootId: "",
-  authProxyUrl: "https://ogd.richardxiong.com/api/access",
+  authProxyUrl: "https://neogdsync-oauth.neogdsync.workers.dev",
   lastSyncedAt: 0,
   changesToken: "",
   syncMode: "smart",
@@ -1264,11 +1264,29 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     new import_obsidian5.Setting(containerEl).setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc("Refresh token for Google Drive").addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
+    const proxyUrl = this.plugin.settings.authProxyUrl;
+    const isConnected = !!this.plugin.settings.refreshToken;
+    const authSetting = new import_obsidian5.Setting(containerEl).setName("Google Drive").setDesc(isConnected ? "\u2705 Connected \u2014 token saved" : "Not connected");
+    if (isConnected) {
+      authSetting.addButton((b) => b.setButtonText("Disconnect").setWarning().onClick(async () => {
+        this.plugin.settings.refreshToken = "";
+        this.plugin.drive = new DriveApi("");
+        clearTokenCache();
+        await this.plugin.saveSettings();
+        this.display();
+      }));
+    } else {
+      authSetting.addButton((b) => b.setButtonText("Connect Google Drive").setCta().onClick(() => {
+        window.open(`${proxyUrl}/authorize`, "_blank");
+        this.display();
+      }));
+    }
+    new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc(isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.').addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
       this.plugin.settings.refreshToken = v.trim();
       this.plugin.drive = new DriveApi(v.trim());
       clearTokenCache();
       await this.plugin.saveSettings();
+      this.display();
     }));
     new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
       t.inputEl.addClass("neogdsync-monospace-input");

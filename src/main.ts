@@ -388,15 +388,46 @@ class NeoSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl).setHeading();
 
+    // ── Google Drive auth ──────────────────────────────────────
+    const proxyUrl = this.plugin.settings.authProxyUrl;
+    const isConnected = !!this.plugin.settings.refreshToken;
+
+    const authSetting = new Setting(containerEl)
+      .setName('Google Drive')
+      .setDesc(isConnected ? '✅ Connected — token saved' : 'Not connected');
+
+    if (isConnected) {
+      authSetting.addButton(b => b
+        .setButtonText('Disconnect')
+        .setWarning()
+        .onClick(async () => {
+          this.plugin.settings.refreshToken = '';
+          this.plugin.drive = new DriveApi('');
+          clearTokenCache();
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+    } else {
+      authSetting.addButton(b => b
+        .setButtonText('Connect Google Drive')
+        .setCta()
+        .onClick(() => {
+          window.open(`${proxyUrl}/authorize`, '_blank');
+          // After user returns with their token, show the paste field
+          this.display();
+        }));
+    }
+
     new Setting(containerEl)
       .setName('Refresh token')
-      .setDesc('Refresh token for Google Drive')
+      .setDesc(isConnected ? 'Token is set. Re-paste to update.' : 'Complete "Connect" above, then paste the token here.')
       .addText(t => t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
         .onChange(async v => {
           this.plugin.settings.refreshToken = v.trim();
           this.plugin.drive = new DriveApi(v.trim());
           clearTokenCache();
           await this.plugin.saveSettings();
+          this.display();
         }));
 
     new Setting(containerEl)
