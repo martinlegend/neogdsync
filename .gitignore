@@ -1,10 +1,13 @@
 # User data — never commit
 data.json
 .neogdsync/
+index.db
+.claude/
 
 # Build artifacts
 node_modules/
 *.js.map
+src/*.js
 
 # Misc
 .DS_Store
