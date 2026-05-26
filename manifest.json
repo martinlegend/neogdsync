@@ -1,14 +1,14 @@
 {
   "id": "neogdsync",
   "name": "NeoGDSync",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "minAppVersion": "1.6.0",
   "description": "Lightweight Google Drive sync with path-based index, conflict detection, and smart/push/pull modes.",
   "author": "martinlegend",
   "authorUrl": "https://github.com/martinlegend",
   "isDesktopOnly": false,
   "fundingUrl": {
-    "ko-fi": "https://ko-fi.com/neogdsync",
-    "custom": ["https://nowpayments.io/donation/neogdsync"]
+    "Ko-fi": "https://ko-fi.com/neogdsync",
+    "Stablecoin": "https://nowpayments.io/donation/neogdsync"
   }
 }
