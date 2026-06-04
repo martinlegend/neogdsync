@@ -1,4 +1,8 @@
-# NeoGDSync
+<p align="center">
+  <img src="docs/logo.png" alt="NeoGDSync logo" width="160" height="160">
+</p>
+
+<h1 align="center">NeoGDSync</h1>
 
 Lightweight Google Drive sync plugin for [Obsidian](https://obsidian.md).
 
