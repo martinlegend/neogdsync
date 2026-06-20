@@ -14,8 +14,9 @@ async function driveRequest(
   body?: string | ArrayBuffer,
   headers?: Record<string, string>,
   refreshToken?: string,
+  proxyUrl?: string,
 ): Promise<{ status: number; json: unknown; text: string; arrayBuffer: ArrayBuffer }> {
-  const token = refreshToken ? await getAccessToken(refreshToken) : '';
+  const token = refreshToken ? await getAccessToken(refreshToken, proxyUrl) : '';
   const resp = await requestUrl({
     url,
     method,
@@ -31,10 +32,10 @@ async function driveRequest(
 }
 
 export class DriveApi {
-  constructor(private refreshToken: string) {}
+  constructor(private refreshToken: string, private proxyUrl?: string) {}
 
   private request(method: string, url: string, body?: string | ArrayBuffer, headers?: Record<string, string>) {
-    return driveRequest(method, url, body, headers, this.refreshToken);
+    return driveRequest(method, url, body, headers, this.refreshToken, this.proxyUrl);
   }
 
   // ── Folder operations ──────────────────────────────────────────

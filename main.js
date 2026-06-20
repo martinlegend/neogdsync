@@ -76,8 +76,8 @@ function clearTokenCache() {
 var BASE = "https://www.googleapis.com/drive/v3";
 var UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 var FOLDER_MIME = "application/vnd.google-apps.folder";
-async function driveRequest(method, url, body, headers, refreshToken) {
-  const token = refreshToken ? await getAccessToken(refreshToken) : "";
+async function driveRequest(method, url, body, headers, refreshToken, proxyUrl) {
+  const token = refreshToken ? await getAccessToken(refreshToken, proxyUrl) : "";
   const resp = await (0, import_obsidian2.requestUrl)({
     url,
     method,
@@ -92,11 +92,12 @@ async function driveRequest(method, url, body, headers, refreshToken) {
   return resp;
 }
 var DriveApi = class {
-  constructor(refreshToken) {
+  constructor(refreshToken, proxyUrl) {
     this.refreshToken = refreshToken;
+    this.proxyUrl = proxyUrl;
   }
   request(method, url, body, headers) {
-    return driveRequest(method, url, body, headers, this.refreshToken);
+    return driveRequest(method, url, body, headers, this.refreshToken, this.proxyUrl);
   }
   // ── Folder operations ──────────────────────────────────────────
   async listChildren(folderId) {
@@ -926,7 +927,7 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
   async onload() {
     this.snapshot = new VaultSnapshot(this.app);
     await this.loadSettings();
-    this.drive = new DriveApi(this.settings.refreshToken);
+    this.drive = new DriveApi(this.settings.refreshToken, this.settings.authProxyUrl);
     this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
     await this.index.load();
     this.app.workspace.onLayoutReady(() => {
@@ -1274,11 +1275,20 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     new import_obsidian5.Setting(containerEl).setHeading();
     const proxyUrl = this.plugin.settings.authProxyUrl;
     const isConnected = !!this.plugin.settings.refreshToken;
+    new import_obsidian5.Setting(containerEl).setName("Auth proxy URL").setDesc("Cloudflare Worker that exchanges your refresh token for an access token. Change this to your own self-hosted worker before connecting if you deployed one \u2014 see the README for self-hosting instructions.").addText((t) => {
+      t.inputEl.addClass("neogdsync-monospace-input");
+      t.setPlaceholder(DEFAULT_PROXY_URL).setValue(this.plugin.settings.authProxyUrl).onChange(async (v) => {
+        this.plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
+        this.plugin.drive = new DriveApi(this.plugin.settings.refreshToken, this.plugin.settings.authProxyUrl);
+        clearTokenCache();
+        await this.plugin.saveSettings();
+      });
+    });
     const authSetting = new import_obsidian5.Setting(containerEl).setName("Google Drive").setDesc(isConnected ? "\u2705 Connected \u2014 token saved" : "Not connected");
     if (isConnected) {
       authSetting.addButton((b) => b.setButtonText("Disconnect").setWarning().onClick(async () => {
         this.plugin.settings.refreshToken = "";
-        this.plugin.drive = new DriveApi("");
+        this.plugin.drive = new DriveApi("", this.plugin.settings.authProxyUrl);
         clearTokenCache();
         await this.plugin.saveSettings();
         this.display();
@@ -1291,7 +1301,7 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     }
     new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc(isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.').addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
       this.plugin.settings.refreshToken = v.trim();
-      this.plugin.drive = new DriveApi(v.trim());
+      this.plugin.drive = new DriveApi(v.trim(), this.plugin.settings.authProxyUrl);
       clearTokenCache();
       await this.plugin.saveSettings();
       this.display();
