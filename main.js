@@ -1275,6 +1275,15 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     new import_obsidian5.Setting(containerEl).setHeading();
     const proxyUrl = this.plugin.settings.authProxyUrl;
     const isConnected = !!this.plugin.settings.refreshToken;
+    new import_obsidian5.Setting(containerEl).setName("Auth proxy URL").setDesc("Cloudflare Worker that exchanges your refresh token for an access token. Change this to your own self-hosted worker before connecting if you deployed one \u2014 see the README for self-hosting instructions.").addText((t) => {
+      t.inputEl.addClass("neogdsync-monospace-input");
+      t.setPlaceholder(DEFAULT_PROXY_URL).setValue(this.plugin.settings.authProxyUrl).onChange(async (v) => {
+        this.plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
+        this.plugin.drive = new DriveApi(this.plugin.settings.refreshToken, this.plugin.settings.authProxyUrl);
+        clearTokenCache();
+        await this.plugin.saveSettings();
+      });
+    });
     const authSetting = new import_obsidian5.Setting(containerEl).setName("Google Drive").setDesc(isConnected ? "\u2705 Connected \u2014 token saved" : "Not connected");
     if (isConnected) {
       authSetting.addButton((b) => b.setButtonText("Disconnect").setWarning().onClick(async () => {
