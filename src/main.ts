@@ -26,7 +26,7 @@ export default class NeoGDSync extends Plugin {
     this.snapshot = new VaultSnapshot(this.app);
     await this.loadSettings();
 
-    this.drive = new DriveApi(this.settings.refreshToken);
+    this.drive = new DriveApi(this.settings.refreshToken, this.settings.authProxyUrl);
     this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
     await this.index.load();
 
@@ -412,7 +412,7 @@ class NeoSettingsTab extends PluginSettingTab {
         .setWarning()
         .onClick(async () => {
           this.plugin.settings.refreshToken = '';
-          this.plugin.drive = new DriveApi('');
+          this.plugin.drive = new DriveApi('', this.plugin.settings.authProxyUrl);
           clearTokenCache();
           await this.plugin.saveSettings();
           this.display();
@@ -434,7 +434,7 @@ class NeoSettingsTab extends PluginSettingTab {
       .addText(t => t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
         .onChange(async v => {
           this.plugin.settings.refreshToken = v.trim();
-          this.plugin.drive = new DriveApi(v.trim());
+          this.plugin.drive = new DriveApi(v.trim(), this.plugin.settings.authProxyUrl);
           clearTokenCache();
           await this.plugin.saveSettings();
           this.display();
