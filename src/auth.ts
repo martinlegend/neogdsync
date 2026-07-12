@@ -23,7 +23,10 @@ export async function getAccessToken(
   const resp = await requestUrl({
     url: proxyUrl,
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+    },
     body: JSON.stringify({ refresh_token: refreshToken }),
     throw: false,
   });

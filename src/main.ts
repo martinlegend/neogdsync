@@ -9,6 +9,9 @@ import { VaultSnapshot } from './snapshot';
 import { Syncer, SyncResult, normFolder } from './syncer';
 import { clearTokenCache } from './auth';
 
+// Lives under .neogdsync/ so it is excluded from sync (see exclude()).
+const ERROR_LOG_PATH = '.neogdsync/sync-errors.log';
+
 export default class NeoGDSync extends Plugin {
   settings!: NeoSettings;
   pendingOps: PendingOps = {};
@@ -216,13 +219,28 @@ export default class NeoGDSync extends Plugin {
       notice.setMessage(`Done — ${summary}`);
       setTimeout(() => notice.hide(), 4000);
 
-      if (result.errors.length) console.error('[NeoGDSync] Errors:', result.errors);
+      if (result.errors.length) {
+        console.error('[NeoGDSync] Errors:', result.errors);
+        await this.logSyncFailure(mode, result);
+        // Wholesale failure (e.g. network/auth outage during the scheduled 5am sync) used to
+        // vanish into a 4-second notice nobody saw — 2026-07-12: 714 ops all errored silently.
+        const succeeded = result.pushed.length + result.pulled.length + result.deleted.length;
+        if (succeeded === 0 && result.errors.length >= 10) {
+          new Notice(
+            `NeoGDSync: sync failed wholesale — ${result.errors.length} errors, 0 succeeded.\n` +
+            `First: ${result.errors[0].error.slice(0, 120)}\n` +
+            `Details in ${ERROR_LOG_PATH} (click to dismiss)`,
+            0,
+          );
+        }
+      }
       if (result.conflicts.length) new Notice(`${result.conflicts.length} conflict(s) detected`, 6000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       notice.setMessage(`Sync error: ${msg}`);
       setTimeout(() => notice.hide(), 5000);
       console.error('[NeoGDSync]', err);
+      await this.logSyncFailure(mode, null, msg);
       this.syncing = false;
       this.updateStatus();
       return;
@@ -238,6 +256,34 @@ export default class NeoGDSync extends Plugin {
         this.updateStatus();
       });
     }, 600);
+  }
+
+  /**
+   * Persist sync failures to .neogdsync/sync-errors.log (excluded from sync) so scheduled
+   * syncs that fail while nobody is watching leave a durable trace. `result` is null when
+   * the sync aborted with an exception before producing a result.
+   */
+  private async logSyncFailure(mode: string, result: SyncResult | null, fatal?: string) {
+    try {
+      const adapter = this.app.vault.adapter;
+      const ts = new Date().toISOString();
+      const lines: string[] = [];
+      if (result) {
+        const succeeded = result.pushed.length + result.pulled.length + result.deleted.length;
+        lines.push(`[${ts}] mode=${mode} errors=${result.errors.length} succeeded=${succeeded}`);
+        for (const e of result.errors.slice(0, 5)) lines.push(`  ${e.path}: ${e.error.slice(0, 200)}`);
+        if (result.errors.length > 5) lines.push(`  … ${result.errors.length - 5} more`);
+      } else {
+        lines.push(`[${ts}] mode=${mode} FATAL: ${(fatal ?? 'unknown').slice(0, 300)}`);
+      }
+      const prev = (await adapter.exists(ERROR_LOG_PATH)) ? await adapter.read(ERROR_LOG_PATH) : '';
+      // Keep the log bounded: retain roughly the last 500 lines.
+      const merged = (prev + lines.join('\n') + '\n').split('\n');
+      const trimmed = merged.length > 500 ? merged.slice(merged.length - 500) : merged;
+      await adapter.write(ERROR_LOG_PATH, trimmed.join('\n'));
+    } catch (logErr) {
+      console.error('[NeoGDSync] could not write sync-errors.log', logErr);
+    }
   }
 
   async rebuildIndex() {

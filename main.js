@@ -59,7 +59,10 @@ async function getAccessToken(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
   const resp = await (0, import_obsidian.requestUrl)({
     url: proxyUrl,
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    },
     body: JSON.stringify({ refresh_token: refreshToken }),
     throw: false
   });
@@ -915,6 +918,7 @@ function matchGlob(pattern, path) {
 }
 
 // src/main.ts
+var ERROR_LOG_PATH = ".neogdsync/sync-errors.log";
 var NeoGDSync = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
@@ -1093,13 +1097,26 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       const summary = `\u2191${result.pushed.length} \u2193${result.pulled.length} \u{1F5D1}${result.deleted.length}` + (result.conflicts.length ? ` \u26A0\uFE0F${result.conflicts.length} conflicts` : "") + (result.errors.length ? ` \u274C${result.errors.length} errors` : "");
       notice.setMessage(`Done \u2014 ${summary}`);
       setTimeout(() => notice.hide(), 4e3);
-      if (result.errors.length) console.error("[NeoGDSync] Errors:", result.errors);
+      if (result.errors.length) {
+        console.error("[NeoGDSync] Errors:", result.errors);
+        await this.logSyncFailure(mode, result);
+        const succeeded = result.pushed.length + result.pulled.length + result.deleted.length;
+        if (succeeded === 0 && result.errors.length >= 10) {
+          new import_obsidian5.Notice(
+            `NeoGDSync: sync failed wholesale \u2014 ${result.errors.length} errors, 0 succeeded.
+First: ${result.errors[0].error.slice(0, 120)}
+Details in ${ERROR_LOG_PATH} (click to dismiss)`,
+            0
+          );
+        }
+      }
       if (result.conflicts.length) new import_obsidian5.Notice(`${result.conflicts.length} conflict(s) detected`, 6e3);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       notice.setMessage(`Sync error: ${msg}`);
       setTimeout(() => notice.hide(), 5e3);
       console.error("[NeoGDSync]", err);
+      await this.logSyncFailure(mode, null, msg);
       this.syncing = false;
       this.updateStatus();
       return;
@@ -1111,6 +1128,32 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
         this.updateStatus();
       });
     }, 600);
+  }
+  /**
+   * Persist sync failures to .neogdsync/sync-errors.log (excluded from sync) so scheduled
+   * syncs that fail while nobody is watching leave a durable trace. `result` is null when
+   * the sync aborted with an exception before producing a result.
+   */
+  async logSyncFailure(mode, result, fatal) {
+    try {
+      const adapter = this.app.vault.adapter;
+      const ts = (/* @__PURE__ */ new Date()).toISOString();
+      const lines = [];
+      if (result) {
+        const succeeded = result.pushed.length + result.pulled.length + result.deleted.length;
+        lines.push(`[${ts}] mode=${mode} errors=${result.errors.length} succeeded=${succeeded}`);
+        for (const e of result.errors.slice(0, 5)) lines.push(`  ${e.path}: ${e.error.slice(0, 200)}`);
+        if (result.errors.length > 5) lines.push(`  \u2026 ${result.errors.length - 5} more`);
+      } else {
+        lines.push(`[${ts}] mode=${mode} FATAL: ${(fatal != null ? fatal : "unknown").slice(0, 300)}`);
+      }
+      const prev = await adapter.exists(ERROR_LOG_PATH) ? await adapter.read(ERROR_LOG_PATH) : "";
+      const merged = (prev + lines.join("\n") + "\n").split("\n");
+      const trimmed = merged.length > 500 ? merged.slice(merged.length - 500) : merged;
+      await adapter.write(ERROR_LOG_PATH, trimmed.join("\n"));
+    } catch (logErr) {
+      console.error("[NeoGDSync] could not write sync-errors.log", logErr);
+    }
   }
   async rebuildIndex() {
     if (this.syncing) {

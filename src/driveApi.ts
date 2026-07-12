@@ -86,7 +86,7 @@ export class DriveApi {
     const resp = await this.request(
       'POST',
       `${UPLOAD}/files?${params}`,
-      body.buffer,
+      body.buffer as ArrayBuffer,
       { 'Content-Type': `multipart/related; boundary=${boundary}` },
     );
     const { id } = resp.json as { id: string };
@@ -108,7 +108,7 @@ export class DriveApi {
     const resp = await this.request(
       'PATCH',
       `${UPLOAD}/files/${driveId}?${params}`,
-      body.buffer,
+      body.buffer as ArrayBuffer,
       { 'Content-Type': `multipart/related; boundary=${boundary}` },
     );
     const { id } = resp.json as { id: string };
