@@ -515,7 +515,33 @@ class NeoSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Keep revisions').setDesc('Keep file revisions on drive (version history)')
       .addToggle(t => t.setValue(this.plugin.settings.keepRevisions)
-        .onChange(async v => { this.plugin.settings.keepRevisions = v; await this.plugin.saveSettings(); }));
+        .onChange(async v => { this.plugin.settings.keepRevisions = v; await this.plugin.saveSettings(); this.display(); }));
+
+    if (this.plugin.settings.keepRevisions) {
+      new Setting(containerEl)
+        .setName('Revisions to keep — notes')
+        .setDesc('After each push, older pinned revisions of text/Markdown files beyond this count are permanently deleted (drive cannot "unpin" a revision, only delete it).')
+        .addText(t => t.setValue(String(this.plugin.settings.revisionKeepCount))
+          .onChange(async v => {
+            const n = parseInt(v, 10);
+            if (Number.isFinite(n) && n >= 1) {
+              this.plugin.settings.revisionKeepCount = n;
+              await this.plugin.saveSettings();
+            }
+          }));
+
+      new Setting(containerEl)
+        .setName('Revisions to keep — attachments')
+        .setDesc('Same, but for binary attachments (images, PDFs, office docs, …). These are usually replaced wholesale rather than edited, so a lower count is recommended.')
+        .addText(t => t.setValue(String(this.plugin.settings.binaryRevisionKeepCount))
+          .onChange(async v => {
+            const n = parseInt(v, 10);
+            if (Number.isFinite(n) && n >= 1) {
+              this.plugin.settings.binaryRevisionKeepCount = n;
+              await this.plugin.saveSettings();
+            }
+          }));
+    }
 
     new Setting(containerEl)
       .setName('Pending ops').setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`)

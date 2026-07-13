@@ -313,6 +313,12 @@ export class Syncer {
       }
       await this.drive.updateFile(cached.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached, driveMtime: mtime, syncedAt: Date.now() });
+      if (this.settings.keepRevisions) {
+        const keepCount = mime.isBinaryMime(mimeType) ? this.settings.binaryRevisionKeepCount : this.settings.revisionKeepCount;
+        // Best-effort: a prune failure shouldn't fail the sync that just succeeded.
+        this.drive.pruneRevisions(cached.driveId, keepCount).catch(err =>
+          console.warn(`[NeoGDSync] revision prune failed for ${path}:`, err));
+      }
     } else {
       const parentId = await this.index.resolveParentFolder(path);
       const driveId = await this.drive.uploadFile(

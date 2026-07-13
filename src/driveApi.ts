@@ -185,9 +185,34 @@ export class DriveApi {
   }
 
   async listRevisions(driveId: string): Promise<DriveRevision[]> {
-    const resp = await this.request('GET', `${BASE}/files/${driveId}/revisions?fields=revisions(id,modifiedTime,size)`);
+    const resp = await this.request('GET', `${BASE}/files/${driveId}/revisions?fields=revisions(id,modifiedTime,size,keepForever)`);
     const data = resp.json as { revisions?: DriveRevision[] };
     return data.revisions ?? [];
+  }
+
+  // Drive's revisions.update cannot flip keepForever from true to false — the API
+  // rejects it with a 400 "Cannot update a revision to false that is marked as
+  // keepForever" (confirmed empirically 2026-07-13, contradicts the API docs).
+  // The only way to reclaim space from a keepForever revision is to delete it
+  // outright. This is immediate and permanent — no 30-day trash/undo window.
+  async deleteRevision(driveId: string, revisionId: string): Promise<void> {
+    await this.request('DELETE', `${BASE}/files/${driveId}/revisions/${revisionId}`);
+  }
+
+  /**
+   * Keep only the most recent `keepCount` revisions of a file; delete older
+   * ones that were pinned with keepForever. Revisions without keepForever are
+   * left alone since Drive already reclaims those on its own schedule.
+   */
+  async pruneRevisions(driveId: string, keepCount: number): Promise<void> {
+    if (keepCount < 1) return;
+    const revs = await this.listRevisions(driveId); // oldest-first
+    if (revs.length <= keepCount) return;
+    const toDrop = revs.slice(0, revs.length - keepCount);
+    for (const r of toDrop) {
+      if (!r.keepForever) continue;
+      await this.deleteRevision(driveId, r.id);
+    }
   }
 }
 

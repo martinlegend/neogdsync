@@ -34,6 +34,8 @@ var DEFAULT_SETTINGS = {
   changesToken: "",
   syncMode: "smart",
   keepRevisions: true,
+  revisionKeepCount: 5,
+  binaryRevisionKeepCount: 1,
   excludePaths: [
     ".smart-env/**",
     ".smtcmp*",
@@ -217,9 +219,32 @@ var DriveApi = class {
   }
   async listRevisions(driveId) {
     var _a;
-    const resp = await this.request("GET", `${BASE}/files/${driveId}/revisions?fields=revisions(id,modifiedTime,size)`);
+    const resp = await this.request("GET", `${BASE}/files/${driveId}/revisions?fields=revisions(id,modifiedTime,size,keepForever)`);
     const data = resp.json;
     return (_a = data.revisions) != null ? _a : [];
+  }
+  // Drive's revisions.update cannot flip keepForever from true to false — the API
+  // rejects it with a 400 "Cannot update a revision to false that is marked as
+  // keepForever" (confirmed empirically 2026-07-13, contradicts the API docs).
+  // The only way to reclaim space from a keepForever revision is to delete it
+  // outright. This is immediate and permanent — no 30-day trash/undo window.
+  async deleteRevision(driveId, revisionId) {
+    await this.request("DELETE", `${BASE}/files/${driveId}/revisions/${revisionId}`);
+  }
+  /**
+   * Keep only the most recent `keepCount` revisions of a file; delete older
+   * ones that were pinned with keepForever. Revisions without keepForever are
+   * left alone since Drive already reclaims those on its own schedule.
+   */
+  async pruneRevisions(driveId, keepCount) {
+    if (keepCount < 1) return;
+    const revs = await this.listRevisions(driveId);
+    if (revs.length <= keepCount) return;
+    const toDrop = revs.slice(0, revs.length - keepCount);
+    for (const r of toDrop) {
+      if (!r.keepForever) continue;
+      await this.deleteRevision(driveId, r.id);
+    }
   }
 };
 function buildMultipart(boundary, meta, content, mime) {
@@ -543,6 +568,10 @@ function fromPath(path) {
   const ext = (_b = (_a = path.split(".").pop()) == null ? void 0 : _a.toLowerCase()) != null ? _b : "";
   return (_c = MAP[ext]) != null ? _c : "application/octet-stream";
 }
+var TEXT_MIMES = /* @__PURE__ */ new Set(["application/json", "application/javascript", "application/typescript"]);
+function isBinaryMime(mimeType) {
+  return !mimeType.startsWith("text/") && !TEXT_MIMES.has(mimeType);
+}
 
 // src/syncer.ts
 var Syncer = class {
@@ -801,6 +830,10 @@ var Syncer = class {
       }
       await this.drive.updateFile(cached2.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached2, driveMtime: mtime, syncedAt: Date.now() });
+      if (this.settings.keepRevisions) {
+        const keepCount = isBinaryMime(mimeType) ? this.settings.binaryRevisionKeepCount : this.settings.revisionKeepCount;
+        this.drive.pruneRevisions(cached2.driveId, keepCount).catch((err) => console.warn(`[NeoGDSync] revision prune failed for ${path}:`, err));
+      }
     } else {
       const parentId = await this.index.resolveParentFolder(path);
       const driveId = await this.drive.uploadFile(
@@ -1355,7 +1388,24 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     new import_obsidian5.Setting(containerEl).setName("Keep revisions").setDesc("Keep file revisions on drive (version history)").addToggle((t) => t.setValue(this.plugin.settings.keepRevisions).onChange(async (v) => {
       this.plugin.settings.keepRevisions = v;
       await this.plugin.saveSettings();
+      this.display();
     }));
+    if (this.plugin.settings.keepRevisions) {
+      new import_obsidian5.Setting(containerEl).setName("Revisions to keep \u2014 notes").setDesc('After each push, older pinned revisions of text/Markdown files beyond this count are permanently deleted (drive cannot "unpin" a revision, only delete it).').addText((t) => t.setValue(String(this.plugin.settings.revisionKeepCount)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 1) {
+          this.plugin.settings.revisionKeepCount = n;
+          await this.plugin.saveSettings();
+        }
+      }));
+      new import_obsidian5.Setting(containerEl).setName("Revisions to keep \u2014 attachments").setDesc("Same, but for binary attachments (images, PDFs, office docs, \u2026). These are usually replaced wholesale rather than edited, so a lower count is recommended.").addText((t) => t.setValue(String(this.plugin.settings.binaryRevisionKeepCount)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 1) {
+          this.plugin.settings.binaryRevisionKeepCount = n;
+          await this.plugin.saveSettings();
+        }
+      }));
+    }
     new import_obsidian5.Setting(containerEl).setName("Pending ops").setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`).addButton((b) => b.setButtonText("Clear all").onClick(async () => {
       this.plugin.pendingOps = {};
       await this.plugin.saveSettings();

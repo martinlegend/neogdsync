@@ -6,6 +6,12 @@ export interface NeoSettings {
   changesToken: string;
   syncMode: 'smart' | 'push' | 'pull';
   keepRevisions: boolean;
+  // Applies only when keepRevisions is true. After each push, older keepForever
+  // revisions beyond these counts are actively deleted (Drive's revisions.update
+  // cannot unset keepForever — see driveApi.deleteRevision — so pruning must be
+  // done by outright deletion, not by "unpinning" and waiting for GC).
+  revisionKeepCount: number;
+  binaryRevisionKeepCount: number;
   excludePaths: string[];
   concurrency: number;
 }
@@ -18,6 +24,8 @@ export const DEFAULT_SETTINGS: NeoSettings = {
   changesToken: '',
   syncMode: 'smart',
   keepRevisions: true,
+  revisionKeepCount: 5,
+  binaryRevisionKeepCount: 1,
   excludePaths: [
     '.smart-env/**',
     '.smtcmp*',
@@ -79,6 +87,7 @@ export interface DriveRevision {
   id: string;
   modifiedTime: string;
   size?: string;
+  keepForever?: boolean;
 }
 
 export interface ConflictRecord {

@@ -28,3 +28,12 @@ export function fromPath(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? '';
   return MAP[ext] ?? 'application/octet-stream';
 }
+
+const TEXT_MIMES = new Set(['application/json', 'application/javascript', 'application/typescript']);
+
+// Attachments (images, PDFs, video, office docs, …) are usually replaced wholesale
+// rather than incrementally edited, so they don't benefit from deep revision
+// history the way notes do — callers use this to prune their revisions harder.
+export function isBinaryMime(mimeType: string): boolean {
+  return !mimeType.startsWith('text/') && !TEXT_MIMES.has(mimeType);
+}
