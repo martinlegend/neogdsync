@@ -67,7 +67,9 @@ export class VaultSnapshot {
     }
 
     for (const p of Object.keys(this.snapshot)) {
-      if (!currentPaths.has(p)) {
+      // Skip excluded entries: a path that is now excluded (e.g. after the user
+      // added a pattern) merely stops being tracked — it was not deleted.
+      if (!currentPaths.has(p) && !exclude(p)) {
         ops[p] = 'delete';
       }
     }

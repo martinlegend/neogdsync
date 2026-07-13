@@ -1,14 +1,17 @@
 {
   "name": "neogdsync",
-  "version": "1.0.6",
-  "description": "",
-  "main": "index.js",
+  "version": "1.0.9",
+  "description": "Lightweight Google Drive sync plugin for Obsidian",
+  "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["obsidian", "google-drive", "sync"],
+  "author": "martinlegend",
+  "license": "MIT",
   "type": "commonjs",
   "devDependencies": {
     "@types/node": "^25.6.0",
@@ -16,6 +19,8 @@
     "@typescript-eslint/parser": "^8.58.2",
     "esbuild": "^0.28.0",
     "eslint": "^9.39.4",
-    "eslint-plugin-obsidianmd": "github:obsidianmd/eslint-plugin#master"
+    "eslint-plugin-obsidianmd": "github:obsidianmd/eslint-plugin#master",
+    "obsidian": "^1.13.1",
+    "vitest": "^4.1.10"
   }
 }

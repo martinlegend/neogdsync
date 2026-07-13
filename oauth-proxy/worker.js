@@ -108,6 +108,17 @@ export default {
 
 // ── HTML helpers ───────────────────────────────────────────────
 
+// Never interpolate request-derived strings into HTML unescaped — /callback?error=…
+// is attacker-controlled and was a reflected XSS.
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 function successPage(refreshToken) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -128,7 +139,7 @@ function successPage(refreshToken) {
 <body>
   <h1>✅ Google Drive connected</h1>
   <p>Copy your refresh token below, then paste it into NeoGDSync settings.</p>
-  <div class="token-box" id="token">${refreshToken}</div>
+  <div class="token-box" id="token">${escapeHtml(refreshToken)}</div>
   <button class="copy-btn" onclick="copyToken()">Copy token</button>
   <p style="margin-top:24px">
     <span class="step">Back in Obsidian → NeoGDSync settings:</span><br>
@@ -158,7 +169,7 @@ function errorPage(error) {
 </head>
 <body>
   <h1>❌ Authorization failed</h1>
-  <p>${error}</p>
+  <p>${escapeHtml(error)}</p>
   <p><a href="/authorize">Try again</a></p>
 </body>
 </html>`;
