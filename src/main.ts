@@ -483,15 +483,29 @@ class NeoSettingsTab extends PluginSettingTab {
         }));
     }
 
+    let tokenInputEl: HTMLInputElement | undefined;
     new Setting(containerEl)
       .setName('Refresh token')
       .setDesc(isConnected ? 'Token is set. Re-paste to update.' : 'Complete "Connect" above, then paste the token here.')
-      .addText(t => t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
-        .onChange(async v => {
-          this.plugin.settings.refreshToken = v.trim();
-          this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
-          clearTokenCache();
-          await this.plugin.saveSettings();
+      .addText(t => {
+        // Masked by default — this token grants full read/write/delete access to the
+        // user's Drive, and settings tabs are commonly captured in screenshots/screen shares.
+        t.inputEl.type = 'password';
+        tokenInputEl = t.inputEl;
+        t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
+          .onChange(async v => {
+            this.plugin.settings.refreshToken = v.trim();
+            this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
+            clearTokenCache();
+            await this.plugin.saveSettings();
+          });
+      })
+      .addExtraButton(b => b
+        .setIcon('eye')
+        .setTooltip('Show/hide token')
+        .onClick(() => {
+          if (!tokenInputEl) return;
+          tokenInputEl.type = tokenInputEl.type === 'password' ? 'text' : 'password';
         }));
 
     new Setting(containerEl)

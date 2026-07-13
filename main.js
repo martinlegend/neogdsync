@@ -1461,11 +1461,19 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
         this.display();
       }));
     }
-    new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc(isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.').addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
-      this.plugin.settings.refreshToken = v.trim();
-      this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
-      clearTokenCache();
-      await this.plugin.saveSettings();
+    let tokenInputEl;
+    new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc(isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.').addText((t) => {
+      t.inputEl.type = "password";
+      tokenInputEl = t.inputEl;
+      t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
+        this.plugin.settings.refreshToken = v.trim();
+        this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
+        clearTokenCache();
+        await this.plugin.saveSettings();
+      });
+    }).addExtraButton((b) => b.setIcon("eye").setTooltip("Show/hide token").onClick(() => {
+      if (!tokenInputEl) return;
+      tokenInputEl.type = tokenInputEl.type === "password" ? "text" : "password";
     }));
     new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
       t.inputEl.addClass("neogdsync-monospace-input");

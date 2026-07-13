@@ -1,6 +1,6 @@
 {
   "name": "neogdsync",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Lightweight Google Drive sync plugin for Obsidian",
   "main": "main.js",
   "scripts": {
