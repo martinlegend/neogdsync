@@ -1,7 +1,7 @@
 /** Google Drive API v3 wrapper */
 
 import { requestUrl } from 'obsidian';
-import { getAccessToken } from './auth';
+import { getAccessToken, DEFAULT_PROXY_URL } from './auth';
 import { DriveFileInfo, DriveChange, DriveRevision } from './types';
 
 const BASE = 'https://www.googleapis.com/drive/v3';
@@ -14,8 +14,9 @@ async function driveRequest(
   body?: string | ArrayBuffer,
   headers?: Record<string, string>,
   refreshToken?: string,
+  proxyUrl?: string,
 ): Promise<{ status: number; json: unknown; text: string; arrayBuffer: ArrayBuffer }> {
-  const token = refreshToken ? await getAccessToken(refreshToken) : '';
+  const token = refreshToken ? await getAccessToken(refreshToken, proxyUrl) : '';
   const resp = await requestUrl({
     url,
     method,
@@ -31,10 +32,19 @@ async function driveRequest(
 }
 
 export class DriveApi {
-  constructor(private refreshToken: string) {}
+  constructor(
+    private refreshToken: string,
+    private proxyUrl: string = DEFAULT_PROXY_URL,
+  ) {}
+
+  /** Update credentials in place so long-lived holders (PathIndex, Syncer) stay valid. */
+  setAuth(refreshToken: string, proxyUrl: string = DEFAULT_PROXY_URL): void {
+    this.refreshToken = refreshToken;
+    this.proxyUrl = proxyUrl;
+  }
 
   private request(method: string, url: string, body?: string | ArrayBuffer, headers?: Record<string, string>) {
-    return driveRequest(method, url, body, headers, this.refreshToken);
+    return driveRequest(method, url, body, headers, this.refreshToken, this.proxyUrl);
   }
 
   // ── Folder operations ──────────────────────────────────────────
@@ -78,7 +88,7 @@ export class DriveApi {
     modifiedTime: string,
     keepRevision = false,
   ): Promise<string> {
-    const boundary = 'neogdsync_boundary';
+    const boundary = randomBoundary();
     const meta = JSON.stringify({ name, parents: [parentId], modifiedTime });
     const body = buildMultipart(boundary, meta, content, mimeType);
     const params = new URLSearchParams({ uploadType: 'multipart', fields: 'id' });
@@ -86,7 +96,7 @@ export class DriveApi {
     const resp = await this.request(
       'POST',
       `${UPLOAD}/files?${params}`,
-      body.buffer as ArrayBuffer,
+      body,
       { 'Content-Type': `multipart/related; boundary=${boundary}` },
     );
     const { id } = resp.json as { id: string };
@@ -100,7 +110,7 @@ export class DriveApi {
     modifiedTime: string,
     keepRevision = false,
   ): Promise<string> {
-    const boundary = 'neogdsync_boundary';
+    const boundary = randomBoundary();
     const meta = JSON.stringify({ modifiedTime });
     const body = buildMultipart(boundary, meta, content, mimeType);
     const params = new URLSearchParams({ uploadType: 'multipart', fields: 'id' });
@@ -108,7 +118,7 @@ export class DriveApi {
     const resp = await this.request(
       'PATCH',
       `${UPLOAD}/files/${driveId}?${params}`,
-      body.buffer as ArrayBuffer,
+      body,
       { 'Content-Type': `multipart/related; boundary=${boundary}` },
     );
     const { id } = resp.json as { id: string };
@@ -218,16 +228,23 @@ export class DriveApi {
 
 // ── helpers ────────────────────────────────────────────────────
 
-function buildMultipart(boundary: string, meta: string, content: ArrayBuffer, mime: string): Uint8Array {
+// Fixed boundaries break the upload if the file content happens to contain them;
+// a random suffix makes a collision practically impossible.
+function randomBoundary(): string {
+  return 'ngds_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+
+function buildMultipart(boundary: string, meta: string, content: ArrayBuffer, mime: string): ArrayBuffer {
   const enc = new TextEncoder();
   const header = enc.encode(
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n` +
     `--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`,
   );
   const footer = enc.encode(`\r\n--${boundary}--`);
-  const body = new Uint8Array(header.byteLength + content.byteLength + footer.byteLength);
+  const buffer = new ArrayBuffer(header.byteLength + content.byteLength + footer.byteLength);
+  const body = new Uint8Array(buffer);
   body.set(header, 0);
   body.set(new Uint8Array(content), header.byteLength);
   body.set(footer, header.byteLength + content.byteLength);
-  return body;
+  return buffer;
 }

@@ -1,7 +1,5 @@
 {
   "compilerOptions": {
-    "ignoreDeprecations": "6.0",
-    "baseUrl": ".",
     "inlineSourceMap": true,
     "inlineSources": true,
     "module": "ESNext",
@@ -10,6 +8,7 @@
     "moduleResolution": "bundler",
     "importHelpers": true,
     "strict": true,
+    "skipLibCheck": true,
     "noImplicitAny": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,

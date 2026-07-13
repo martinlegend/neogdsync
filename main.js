@@ -55,8 +55,10 @@ var import_obsidian = require("obsidian");
 var DEFAULT_PROXY_URL = "https://neogdsync-worker.neogdsync.workers.dev";
 var cached = null;
 async function getAccessToken(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
-  if (cached && Date.now() < cached.expiresAt - 6e4) {
-    return cached.token;
+  const key = `${proxyUrl}
+${refreshToken}`;
+  if (cached && cached.key === key && Date.now() < cached.value.expiresAt - 6e4) {
+    return cached.value.token;
   }
   const resp = await (0, import_obsidian.requestUrl)({
     url: proxyUrl,
@@ -70,8 +72,8 @@ async function getAccessToken(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
   });
   if (resp.status >= 400) throw new Error(`Auth failed: ${resp.status}`);
   const { access_token, expires_in } = resp.json;
-  cached = { token: access_token, expiresAt: Date.now() + expires_in * 1e3 };
-  return cached.token;
+  cached = { key, value: { token: access_token, expiresAt: Date.now() + expires_in * 1e3 } };
+  return access_token;
 }
 function clearTokenCache() {
   cached = null;
@@ -81,8 +83,8 @@ function clearTokenCache() {
 var BASE = "https://www.googleapis.com/drive/v3";
 var UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 var FOLDER_MIME = "application/vnd.google-apps.folder";
-async function driveRequest(method, url, body, headers, refreshToken) {
-  const token = refreshToken ? await getAccessToken(refreshToken) : "";
+async function driveRequest(method, url, body, headers, refreshToken, proxyUrl) {
+  const token = refreshToken ? await getAccessToken(refreshToken, proxyUrl) : "";
   const resp = await (0, import_obsidian2.requestUrl)({
     url,
     method,
@@ -97,11 +99,17 @@ async function driveRequest(method, url, body, headers, refreshToken) {
   return resp;
 }
 var DriveApi = class {
-  constructor(refreshToken) {
+  constructor(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
     this.refreshToken = refreshToken;
+    this.proxyUrl = proxyUrl;
+  }
+  /** Update credentials in place so long-lived holders (PathIndex, Syncer) stay valid. */
+  setAuth(refreshToken, proxyUrl = DEFAULT_PROXY_URL) {
+    this.refreshToken = refreshToken;
+    this.proxyUrl = proxyUrl;
   }
   request(method, url, body, headers) {
-    return driveRequest(method, url, body, headers, this.refreshToken);
+    return driveRequest(method, url, body, headers, this.refreshToken, this.proxyUrl);
   }
   // ── Folder operations ──────────────────────────────────────────
   async listChildren(folderId) {
@@ -134,7 +142,7 @@ var DriveApi = class {
   }
   // ── File operations ────────────────────────────────────────────
   async uploadFile(name, parentId, content, mimeType, modifiedTime, keepRevision = false) {
-    const boundary = "neogdsync_boundary";
+    const boundary = randomBoundary();
     const meta = JSON.stringify({ name, parents: [parentId], modifiedTime });
     const body = buildMultipart(boundary, meta, content, mimeType);
     const params = new URLSearchParams({ uploadType: "multipart", fields: "id" });
@@ -142,14 +150,14 @@ var DriveApi = class {
     const resp = await this.request(
       "POST",
       `${UPLOAD}/files?${params}`,
-      body.buffer,
+      body,
       { "Content-Type": `multipart/related; boundary=${boundary}` }
     );
     const { id } = resp.json;
     return id;
   }
   async updateFile(driveId, content, mimeType, modifiedTime, keepRevision = false) {
-    const boundary = "neogdsync_boundary";
+    const boundary = randomBoundary();
     const meta = JSON.stringify({ modifiedTime });
     const body = buildMultipart(boundary, meta, content, mimeType);
     const params = new URLSearchParams({ uploadType: "multipart", fields: "id" });
@@ -157,7 +165,7 @@ var DriveApi = class {
     const resp = await this.request(
       "PATCH",
       `${UPLOAD}/files/${driveId}?${params}`,
-      body.buffer,
+      body,
       { "Content-Type": `multipart/related; boundary=${boundary}` }
     );
     const { id } = resp.json;
@@ -247,6 +255,9 @@ var DriveApi = class {
     }
   }
 };
+function randomBoundary() {
+  return "ngds_" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
 function buildMultipart(boundary, meta, content, mime) {
   const enc = new TextEncoder();
   const header = enc.encode(
@@ -261,16 +272,18 @@ Content-Type: ${mime}\r
   );
   const footer = enc.encode(`\r
 --${boundary}--`);
-  const body = new Uint8Array(header.byteLength + content.byteLength + footer.byteLength);
+  const buffer = new ArrayBuffer(header.byteLength + content.byteLength + footer.byteLength);
+  const body = new Uint8Array(buffer);
   body.set(header, 0);
   body.set(new Uint8Array(content), header.byteLength);
   body.set(footer, header.byteLength + content.byteLength);
-  return body;
+  return buffer;
 }
 
 // src/pathIndex.ts
 var import_obsidian3 = require("obsidian");
 var INDEX_PATH = ".neogdsync/index.db";
+var TMP_PATH = ".neogdsync/index.db.tmp";
 var FOLDER_MIME2 = "application/vnd.google-apps.folder";
 var PathIndex = class {
   constructor(app, drive, vaultRootId) {
@@ -282,17 +295,26 @@ var PathIndex = class {
   }
   // ── Persistence ────────────────────────────────────────────────
   async load() {
-    try {
-      const raw = await this.app.vault.adapter.read((0, import_obsidian3.normalizePath)(INDEX_PATH));
-      this.index = JSON.parse(raw);
-    } catch (e) {
-      this.index = {};
+    for (const candidate of [INDEX_PATH, TMP_PATH]) {
+      try {
+        const raw = await this.app.vault.adapter.read((0, import_obsidian3.normalizePath)(candidate));
+        this.index = JSON.parse(raw);
+        return;
+      } catch (e) {
+      }
     }
+    this.index = {};
+    console.warn('[NeoGDSync] No readable index found \u2014 starting empty. Run "Rebuild drive index" if this vault was synced before.');
   }
   async save() {
     if (!this.dirty) return;
     await ensureDir(this.app, ".neogdsync");
-    await this.app.vault.adapter.write((0, import_obsidian3.normalizePath)(INDEX_PATH), JSON.stringify(this.index, null, 2));
+    const adapter = this.app.vault.adapter;
+    await adapter.write((0, import_obsidian3.normalizePath)(TMP_PATH), JSON.stringify(this.index, null, 2));
+    if (await adapter.exists((0, import_obsidian3.normalizePath)(INDEX_PATH))) {
+      await adapter.remove((0, import_obsidian3.normalizePath)(INDEX_PATH));
+    }
+    await adapter.rename((0, import_obsidian3.normalizePath)(TMP_PATH), (0, import_obsidian3.normalizePath)(INDEX_PATH));
     this.dirty = false;
   }
   // ── Core lookups ───────────────────────────────────────────────
@@ -522,7 +544,7 @@ var VaultSnapshot = class {
       }
     }
     for (const p of Object.keys(this.snapshot)) {
-      if (!currentPaths.has(p)) {
+      if (!currentPaths.has(p) && !exclude(p)) {
         ops[p] = "delete";
       }
     }
@@ -538,6 +560,40 @@ var VaultSnapshot = class {
 
 // src/syncer.ts
 var import_obsidian4 = require("obsidian");
+
+// src/exclude.ts
+function isExcluded(path, configDir, patterns) {
+  if (path === ".neogdsync" || path.startsWith(".neogdsync/")) return true;
+  if (path === configDir || path.startsWith(configDir + "/")) return true;
+  if (path === ".smart-env" || path.startsWith(".smart-env/")) return true;
+  if (path.startsWith(".smtcmp")) return true;
+  if (path.endsWith(".DS_Store")) return true;
+  if (path === ".git" || path.startsWith(".git/") || path.includes("/.git/")) return true;
+  if (path.includes("node_modules/")) return true;
+  for (const pat of patterns) {
+    if (matchGlob(pat, path)) return true;
+  }
+  return false;
+}
+function matchGlob(pattern, path) {
+  let r = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "*" && pattern[i + 1] === "*") {
+      r += ".*";
+      i++;
+    } else if (c === "*") {
+      r += "[^/]*";
+    } else if (c === "?") {
+      r += "[^/]";
+    } else if (".+^${}()|[]\\".includes(c)) {
+      r += "\\" + c;
+    } else {
+      r += c;
+    }
+  }
+  return new RegExp("^" + r + "$").test(path);
+}
 
 // src/mime.ts
 var MAP = {
@@ -584,19 +640,16 @@ var Syncer = class {
     this.pendingOps = pendingOps;
     this.onProgress = onProgress;
     this.conflicts = [];
+    /**
+     * Paths this sync run has written or trashed locally. main.ts consults this
+     * set to ignore the vault events caused by our own writes, while still
+     * recording real user edits made during the sync — a global "syncing" flag
+     * would drop those edits and they'd never be pushed.
+     */
+    this.syncWrites = /* @__PURE__ */ new Set();
   }
   exclude(path) {
-    if (path.startsWith(".neogdsync/")) return true;
-    if (path.startsWith(".smart-env/")) return true;
-    if (path.startsWith(".smtcmp")) return true;
-    if (path.endsWith(".DS_Store")) return true;
-    if (path.includes("node_modules/")) return true;
-    if (path.startsWith(".git/")) return true;
-    if (path === ".neogdsync") return true;
-    for (const pat of this.settings.excludePaths) {
-      if (matchGlob(pat, path)) return true;
-    }
-    return false;
+    return isExcluded(path, this.app.vault.configDir, this.settings.excludePaths);
   }
   // ── Smart Sync ─────────────────────────────────────────────────
   async smartSync() {
@@ -643,6 +696,23 @@ var Syncer = class {
       }
     );
     if (unknownChanges.length > 0) {
+      const metaCache = /* @__PURE__ */ new Map();
+      const getMeta = async (fileId) => {
+        var _a2;
+        if (metaCache.has(fileId)) return (_a2 = metaCache.get(fileId)) != null ? _a2 : null;
+        try {
+          const meta = await this.drive.getFileMeta(fileId);
+          metaCache.set(fileId, meta);
+          return meta;
+        } catch (err) {
+          console.warn(
+            `[NeoGDSync] Could not resolve unknown fileId ${fileId}:`,
+            err instanceof Error ? err.message : String(err)
+          );
+          metaCache.set(fileId, null);
+          return null;
+        }
+      };
       const folderIdToPath = /* @__PURE__ */ new Map();
       folderIdToPath.set(this.settings.vaultRootId, "");
       for (const p of this.index.allPaths()) {
@@ -650,80 +720,71 @@ var Syncer = class {
         if (e == null ? void 0 : e.isFolder) folderIdToPath.set(e.driveId, p);
       }
       for (const c of unknownChanges) {
-        try {
-          const meta = await this.drive.getFileMeta(c.fileId);
-          if (meta.trashed || meta.mimeType !== FOLDER_MIME3) continue;
-          const parentId = (_c = meta.parents) == null ? void 0 : _c[0];
-          if (!parentId) continue;
-          const parentPath = folderIdToPath.get(parentId);
-          if (parentPath === void 0) continue;
-          const folderLocalPath = parentPath ? `${parentPath}/${meta.name}` : meta.name;
-          if (this.exclude(folderLocalPath)) continue;
-          folderIdToPath.set(c.fileId, folderLocalPath);
-          this.index.set(folderLocalPath, {
-            driveId: c.fileId,
-            driveMtime: meta.modifiedTime,
-            syncedAt: 0,
-            isFolder: true
-          });
-        } catch (err) {
-          console.warn(
-            `[NeoGDSync] Could not resolve unknown folder ${c.fileId}:`,
-            err instanceof Error ? err.message : String(err)
-          );
-        }
+        const meta = await getMeta(c.fileId);
+        if (!meta || meta.trashed || meta.mimeType !== FOLDER_MIME3) continue;
+        const parentId = (_c = meta.parents) == null ? void 0 : _c[0];
+        if (!parentId) continue;
+        const parentPath = folderIdToPath.get(parentId);
+        if (parentPath === void 0) continue;
+        const folderLocalPath = parentPath ? `${parentPath}/${meta.name}` : meta.name;
+        if (this.exclude(folderLocalPath)) continue;
+        folderIdToPath.set(c.fileId, folderLocalPath);
+        this.index.set(folderLocalPath, {
+          driveId: c.fileId,
+          driveMtime: meta.modifiedTime,
+          syncedAt: 0,
+          isFolder: true
+        });
       }
       for (const c of unknownChanges) {
-        try {
-          const meta = await this.drive.getFileMeta(c.fileId);
-          if (meta.trashed) continue;
-          if (meta.mimeType === FOLDER_MIME3) continue;
-          const parentId = (_d = meta.parents) == null ? void 0 : _d[0];
-          if (!parentId) {
-            console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}) has no parent, skipping`);
-            continue;
-          }
-          const folderPath = folderIdToPath.get(parentId);
-          if (folderPath === void 0) {
-            console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}): parent folder ${parentId} not in index \u2014 run Rebuild Index to repair`);
-            continue;
-          }
-          const localPath = folderPath ? `${folderPath}/${meta.name}` : meta.name;
-          if (this.exclude(localPath)) continue;
-          this.index.set(localPath, {
-            driveId: c.fileId,
-            driveMtime: meta.modifiedTime,
-            syncedAt: 0,
-            isFolder: false
-          });
-          driveIdToPath.set(c.fileId, localPath);
-          driveChanged.set(localPath, { removed: false, mtime: meta.modifiedTime });
-        } catch (err) {
-          console.warn(
-            `[NeoGDSync] Could not resolve unknown fileId ${c.fileId}:`,
-            err instanceof Error ? err.message : String(err)
-          );
+        const meta = await getMeta(c.fileId);
+        if (!meta) continue;
+        if (meta.trashed) continue;
+        if (meta.mimeType === FOLDER_MIME3) continue;
+        const parentId = (_d = meta.parents) == null ? void 0 : _d[0];
+        if (!parentId) {
+          console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}) has no parent, skipping`);
+          continue;
         }
+        const folderPath = folderIdToPath.get(parentId);
+        if (folderPath === void 0) {
+          console.warn(`[NeoGDSync] Unknown fileId ${c.fileId} (${meta.name}): parent folder ${parentId} not in index \u2014 run Rebuild Index to repair`);
+          continue;
+        }
+        const localPath = folderPath ? `${folderPath}/${meta.name}` : meta.name;
+        if (this.exclude(localPath)) continue;
+        this.index.set(localPath, {
+          driveId: c.fileId,
+          driveMtime: meta.modifiedTime,
+          syncedAt: 0,
+          isFolder: false
+        });
+        driveIdToPath.set(c.fileId, localPath);
+        driveChanged.set(localPath, { removed: false, mtime: meta.modifiedTime });
       }
     }
     const allOps = Object.entries(this.pendingOps);
     let done = 0;
     for (const [path, op] of allOps) {
       this.onProgress(`[${++done}/${allOps.length}] ${op}: ${path}`);
-      if (this.exclude(path)) continue;
+      if (this.exclude(path)) {
+        delete this.pendingOps[path];
+        continue;
+      }
       try {
         if (op === "delete") {
           await this.handleDelete(path, result);
         } else {
           const driveChange = driveChanged.get(path);
           const indexEntry = this.index.get(path);
-          const isDriveNewer = driveChange && !driveChange.removed && driveChange.mtime && indexEntry && driveChange.mtime > indexEntry.driveMtime;
+          const isDriveNewer = driveChange && !driveChange.removed && driveChange.mtime && indexEntry && (driveChange.mtime > indexEntry.driveMtime || indexEntry.syncedAt === 0);
           if (isDriveNewer) {
             await this.handleConflict(path, driveChange.mtime, result);
           } else {
             await this.handlePush(path, op, result);
           }
         }
+        if (this.pendingOps[path] === op) delete this.pendingOps[path];
       } catch (err) {
         result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
@@ -734,9 +795,6 @@ var Syncer = class {
     this.settings.lastSyncedAt = Date.now();
     this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
-      delete this.pendingOps[p];
-    }
     return result;
   }
   // ── Force Push ─────────────────────────────────────────────────
@@ -751,10 +809,14 @@ var Syncer = class {
     let done = 0;
     for (const [path, op] of allOps) {
       this.onProgress(`[${++done}/${allOps.length}] push: ${path}`);
-      if (this.exclude(path)) continue;
+      if (this.exclude(path)) {
+        delete this.pendingOps[path];
+        continue;
+      }
       try {
         if (op === "delete") await this.handleDelete(path, result);
         else await this.handlePush(path, op, result);
+        if (this.pendingOps[path] === op) delete this.pendingOps[path];
       } catch (err) {
         result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
@@ -765,9 +827,6 @@ var Syncer = class {
     }
     this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    for (const p of [...result.pushed, ...result.deleted, ...result.pulled]) {
-      delete this.pendingOps[p];
-    }
     return result;
   }
   // ── Force Pull ─────────────────────────────────────────────────
@@ -785,26 +844,32 @@ var Syncer = class {
       this.onProgress("Rebuilding drive index\u2026");
       await this.index.rebuild((msg) => this.onProgress(`Crawling: ${msg}`));
     }
-    const paths = this.index.allPaths().filter((p) => !prefix || matchesFolder(p, prefix));
-    let done = 0;
-    for (const path of paths) {
+    const paths = this.index.allPaths().filter((p) => !prefix || matchesFolder(p, prefix)).filter((p) => !this.exclude(p));
+    for (const path of paths.sort()) {
       const entry = this.index.get(path);
-      if (!entry || entry.isFolder) continue;
-      this.onProgress(`[${++done}] pull: ${path}`);
+      if (entry == null ? void 0 : entry.isFolder) await ensureDir2(this.app, path);
+    }
+    const files = paths.filter((p) => {
+      const e = this.index.get(p);
+      return e && !e.isFolder;
+    });
+    let done = 0;
+    await runPool(files, this.settings.concurrency, async (path) => {
+      const entry = this.index.get(path);
+      if (!entry) return;
+      this.onProgress(`[${++done}/${files.length}] pull: ${path}`);
       try {
         const bytes = await this.drive.downloadFile(entry.driveId);
-        await writeLocal(this.app, path, bytes);
+        await this.writeLocal(path, bytes);
         result.pulled.push(path);
+        delete this.pendingOps[path];
       } catch (err) {
         result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
-    }
+    });
     this.settings.lastSyncedAt = Date.now();
     this.snapshot.save((p) => this.exclude(p));
     await this.index.save();
-    for (const p of [...result.pulled, ...result.deleted]) {
-      delete this.pendingOps[p];
-    }
     return result;
   }
   // ── Internal helpers ───────────────────────────────────────────
@@ -827,6 +892,9 @@ var Syncer = class {
         if (currentParentId && currentParentId !== targetParentId) {
           await this.drive.moveFile(cached2.driveId, currentParentId, targetParentId);
         }
+        if (meta.name !== file.name) {
+          await this.drive.renameFile(cached2.driveId, file.name);
+        }
       }
       await this.drive.updateFile(cached2.driveId, bytes, mimeType, mtime, this.settings.keepRevisions);
       this.index.set(path, { ...cached2, driveMtime: mtime, syncedAt: Date.now() });
@@ -835,29 +903,34 @@ var Syncer = class {
         this.drive.pruneRevisions(cached2.driveId, keepCount).catch((err) => console.warn(`[NeoGDSync] revision prune failed for ${path}:`, err));
       }
     } else {
-      const parentId = await this.index.resolveParentFolder(path);
-      const driveId = await this.drive.uploadFile(
-        file.name,
-        parentId,
-        bytes,
-        mimeType,
-        mtime,
-        this.settings.keepRevisions
-      );
-      this.index.set(path, { driveId, driveMtime: mtime, syncedAt: Date.now(), isFolder: false });
+      let existingId = null;
+      if (op === "modify") {
+        existingId = await this.index.findOnDrive(path);
+      }
+      if (existingId) {
+        await this.drive.updateFile(existingId, bytes, mimeType, mtime, this.settings.keepRevisions);
+        this.index.set(path, { driveId: existingId, driveMtime: mtime, syncedAt: Date.now(), isFolder: false });
+      } else {
+        const parentId = await this.index.resolveParentFolder(path);
+        const driveId = await this.drive.uploadFile(
+          file.name,
+          parentId,
+          bytes,
+          mimeType,
+          mtime,
+          this.settings.keepRevisions
+        );
+        this.index.set(path, { driveId, driveMtime: mtime, syncedAt: Date.now(), isFolder: false });
+      }
     }
     result.pushed.push(path);
   }
   async handleDelete(path, result) {
     const cached2 = this.index.get(path);
     if (cached2) {
-      try {
-        await this.drive.deleteFile(cached2.driveId);
-        this.index.delete(path);
-        result.deleted.push(path);
-      } catch (err) {
-        result.errors.push({ path, error: `Drive delete failed: ${err instanceof Error ? err.message : String(err)}` });
-      }
+      await this.drive.deleteFile(cached2.driveId);
+      this.index.delete(path);
+      result.deleted.push(path);
     } else {
       result.deleted.push(path);
     }
@@ -872,82 +945,100 @@ var Syncer = class {
     const localMtime = localFile instanceof import_obsidian4.TFile ? localFile.stat.mtime : 0;
     if (localFile instanceof import_obsidian4.TFile) {
       const localBytes = await this.app.vault.readBinary(localFile);
-      await writeLocal(this.app, conflictPath, localBytes);
+      await this.writeLocal(conflictPath, localBytes, false);
     }
     const driveBytes = await this.drive.downloadFile(entry.driveId);
-    await writeLocal(this.app, path, driveBytes);
+    await this.writeLocal(path, driveBytes);
     this.index.set(path, { ...entry, driveMtime, syncedAt: Date.now() });
     result.conflicts.push({ localPath: path, localMtime, driveMtime, conflictCopyPath: conflictPath, detectedAt: Date.now() });
     result.pulled.push(path);
   }
   async pullNewFromDrive(driveChanged, result, handled) {
-    for (const [path, change] of driveChanged.entries()) {
-      if (this.exclude(path)) continue;
-      if (handled.has(path)) continue;
+    const entries = [...driveChanged.entries()].filter(([path, change]) => {
+      if (this.exclude(path)) return false;
+      if (handled.has(path)) return false;
+      if (change.removed) return true;
+      const entry = this.index.get(path);
+      return !!entry && !entry.isFolder;
+    });
+    const downloads = [];
+    for (const [path, change] of entries) {
       if (change.removed) {
         const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
         if (localFile) {
+          this.syncWrites.add(path);
           await this.app.vault.trash(localFile, true);
           this.index.delete(path);
           result.deleted.push(path);
+          delete this.pendingOps[path];
         }
-        continue;
+      } else {
+        downloads.push(path);
       }
+    }
+    await runPool(downloads, this.settings.concurrency, async (path) => {
       const entry = this.index.get(path);
-      if (!entry || entry.isFolder) continue;
+      const change = driveChanged.get(path);
+      if (!entry || !change) return;
       try {
         const bytes = await this.drive.downloadFile(entry.driveId);
-        await writeLocal(this.app, path, bytes);
+        await this.writeLocal(path, bytes);
         if (change.mtime) {
           this.index.set(path, { ...entry, driveMtime: change.mtime, syncedAt: Date.now() });
         }
         result.pulled.push(path);
+        delete this.pendingOps[path];
       } catch (err) {
         result.errors.push({ path, error: err instanceof Error ? err.message : String(err) });
       }
+    });
+  }
+  /**
+   * Write bytes to the vault. When track=true (default) the path is recorded in
+   * syncWrites so main.ts ignores the resulting vault event.
+   */
+  async writeLocal(path, bytes, track = true) {
+    const norm = (0, import_obsidian4.normalizePath)(path);
+    if (track) this.syncWrites.add(norm);
+    await ensureDirFor(this.app, path);
+    const existing = this.app.vault.getAbstractFileByPath(norm);
+    if (existing instanceof import_obsidian4.TFile) {
+      await this.app.vault.modifyBinary(existing, bytes);
+    } else {
+      await this.app.vault.createBinary(norm, bytes);
     }
   }
 };
-async function writeLocal(app, path, bytes) {
-  const norm = (0, import_obsidian4.normalizePath)(path);
-  const parts = path.split("/");
-  if (parts.length > 1) {
-    const dir = (0, import_obsidian4.normalizePath)(parts.slice(0, -1).join("/"));
+async function ensureDirFor(app, filePath) {
+  const parts = filePath.split("/");
+  if (parts.length <= 1) return;
+  await ensureDir2(app, parts.slice(0, -1).join("/"));
+}
+async function ensureDir2(app, dirPath) {
+  const dir = (0, import_obsidian4.normalizePath)(dirPath);
+  try {
     if (!await app.vault.adapter.exists(dir)) {
       await app.vault.adapter.mkdir(dir);
     }
+  } catch (e) {
+    if (!await app.vault.adapter.exists(dir)) throw new Error(`Could not create folder: ${dir}`);
   }
-  const existing = app.vault.getAbstractFileByPath(norm);
-  if (existing instanceof import_obsidian4.TFile) {
-    await app.vault.modifyBinary(existing, bytes);
-  } else {
-    await app.vault.createBinary(norm, bytes);
-  }
+}
+async function runPool(items, limit, fn) {
+  const workers = Math.max(1, Math.min(limit || 1, items.length));
+  let next = 0;
+  await Promise.all(Array.from({ length: workers }, async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await fn(item);
+    }
+  }));
 }
 function normFolder(p) {
   return p.replace(/^\/+|\/+$/g, "");
 }
 function matchesFolder(filePath, folder) {
   return filePath === folder || filePath.startsWith(folder + "/");
-}
-function matchGlob(pattern, path) {
-  let r = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*" && pattern[i + 1] === "*") {
-      r += ".*";
-      i++;
-    } else if (c === "*") {
-      r += "[^/]*";
-    } else if (c === "?") {
-      r += "[^/]";
-    } else if (".+^${}()|[]\\".includes(c)) {
-      r += "\\" + c;
-    } else {
-      r += c;
-    }
-  }
-  return new RegExp("^" + r + "$").test(path);
 }
 
 // src/main.ts
@@ -963,7 +1054,7 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
   async onload() {
     this.snapshot = new VaultSnapshot(this.app);
     await this.loadSettings();
-    this.drive = new DriveApi(this.settings.refreshToken);
+    this.drive = new DriveApi(this.settings.refreshToken, this.settings.authProxyUrl);
     this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
     await this.index.load();
     this.app.workspace.onLayoutReady(() => {
@@ -1000,15 +1091,11 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     this.registerEvent(this.app.vault.on("rename", (f, old) => this.handleRename(f, old)));
   }
   exclude(path) {
-    if (path.startsWith(".neogdsync")) return true;
-    if (path.startsWith(this.app.vault.configDir)) return true;
-    if (path.startsWith(".smart-env")) return true;
-    if (path.startsWith(".smtcmp")) return true;
-    if (path.endsWith(".DS_Store")) return true;
-    return false;
+    return isExcluded(path, this.app.vault.configDir, this.settings.excludePaths);
   }
   handleCreate(f) {
-    if (this.syncing) return;
+    var _a;
+    if ((_a = this.activeSyncWrites) == null ? void 0 : _a.has(f.path)) return;
     if (this.exclude(f.path)) return;
     if (!(f instanceof import_obsidian5.TFile)) return;
     const cur = this.pendingOps[f.path];
@@ -1021,7 +1108,8 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     this.debouncedSave();
   }
   handleModify(f) {
-    if (this.syncing) return;
+    var _a;
+    if ((_a = this.activeSyncWrites) == null ? void 0 : _a.has(f.path)) return;
     if (this.exclude(f.path) || !(f instanceof import_obsidian5.TFile)) return;
     const snap = this.snapshot.get(f.path);
     if (snap && Math.abs(f.stat.mtime - snap.mtime) <= 2e3 && f.stat.size === snap.size) return;
@@ -1032,6 +1120,8 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     this.debouncedSave();
   }
   handleDelete(f) {
+    var _a;
+    if ((_a = this.activeSyncWrites) == null ? void 0 : _a.has(f.path)) return;
     if (this.exclude(f.path)) return;
     if (this.pendingOps[f.path] === "create") {
       delete this.pendingOps[f.path];
@@ -1069,6 +1159,9 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       console.debug("[NeoGDSync] No snapshot \u2014 saving current vault as baseline");
       this.snapshot.save((p) => this.exclude(p));
       void this.saveSettings();
+      if (this.app.vault.getFiles().length > 0 && this.index.allPaths().length === 0) {
+        new import_obsidian5.Notice("NeoGDSync: first run \u2014 use Force Push (or Force Pull) once to initialize sync", 1e4);
+      }
       return;
     }
     const diff = this.snapshot.computeDiff((p) => this.exclude(p));
@@ -1119,6 +1212,7 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
           notice.setMessage(msg);
         }
       );
+      this.activeSyncWrites = syncer.syncWrites;
       let result;
       if (mode === "push") result = await syncer.forcePush(folder);
       else if (mode === "pull") result = await syncer.forcePull(folder);
@@ -1151,6 +1245,7 @@ Details in ${ERROR_LOG_PATH} (click to dismiss)`,
       console.error("[NeoGDSync]", err);
       await this.logSyncFailure(mode, null, msg);
       this.syncing = false;
+      this.activeSyncWrites = void 0;
       this.updateStatus();
       return;
     }
@@ -1158,6 +1253,7 @@ Details in ${ERROR_LOG_PATH} (click to dismiss)`,
       this.snapshot.save((p) => this.exclude(p));
       void this.saveSettings().finally(() => {
         this.syncing = false;
+        this.activeSyncWrites = void 0;
         this.updateStatus();
       });
     }, 600);
@@ -1354,7 +1450,7 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     if (isConnected) {
       authSetting.addButton((b) => b.setButtonText("Disconnect").setWarning().onClick(async () => {
         this.plugin.settings.refreshToken = "";
-        this.plugin.drive = new DriveApi("");
+        this.plugin.drive.setAuth("", this.plugin.settings.authProxyUrl);
         clearTokenCache();
         await this.plugin.saveSettings();
         this.display();
@@ -1367,10 +1463,9 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
     }
     new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc(isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.').addText((t) => t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
       this.plugin.settings.refreshToken = v.trim();
-      this.plugin.drive = new DriveApi(v.trim());
+      this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
       clearTokenCache();
       await this.plugin.saveSettings();
-      this.display();
     }));
     new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
       t.inputEl.addClass("neogdsync-monospace-input");
@@ -1378,6 +1473,23 @@ var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
         this.plugin.settings.vaultRootId = v.trim();
         this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
         await this.plugin.index.load();
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian5.Setting(containerEl).setName("Auth proxy URL").setDesc("OAuth token-refresh proxy. Leave as default, or point to your own deployment of oauth-proxy/worker.js.").addText((t) => {
+      t.inputEl.addClass("neogdsync-monospace-input");
+      t.setPlaceholder(DEFAULT_PROXY_URL).setValue(this.plugin.settings.authProxyUrl).onChange(async (v) => {
+        this.plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
+        this.plugin.drive.setAuth(this.plugin.settings.refreshToken, this.plugin.settings.authProxyUrl);
+        clearTokenCache();
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian5.Setting(containerEl).setName("Excluded paths").setDesc("Glob patterns to skip, one per line (e.g. Templates/**, **/*.tmp).").addTextArea((t) => {
+      t.inputEl.rows = 5;
+      t.inputEl.addClass("neogdsync-monospace-input");
+      t.setValue(this.plugin.settings.excludePaths.join("\n")).onChange(async (v) => {
+        this.plugin.settings.excludePaths = v.split("\n").map((s) => s.trim()).filter(Boolean);
         await this.plugin.saveSettings();
       });
     });

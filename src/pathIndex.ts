@@ -9,6 +9,7 @@ import { FileIndex, IndexEntry } from './types';
 import { App, normalizePath } from 'obsidian';
 
 const INDEX_PATH = '.neogdsync/index.db';
+const TMP_PATH = '.neogdsync/index.db.tmp';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
 export class PathIndex {
@@ -24,18 +25,32 @@ export class PathIndex {
   // ── Persistence ────────────────────────────────────────────────
 
   async load(): Promise<void> {
-    try {
-      const raw = await this.app.vault.adapter.read(normalizePath(INDEX_PATH));
-      this.index = JSON.parse(raw);
-    } catch {
-      this.index = {};
+    // Try the main file first, then the .tmp left behind if a previous save
+    // crashed between remove and rename. A corrupt index must not be silently
+    // reset — that makes every next push create duplicate files on Drive.
+    for (const candidate of [INDEX_PATH, TMP_PATH]) {
+      try {
+        const raw = await this.app.vault.adapter.read(normalizePath(candidate));
+        this.index = JSON.parse(raw);
+        return;
+      } catch {
+        // fall through to next candidate
+      }
     }
+    this.index = {};
+    console.warn('[NeoGDSync] No readable index found — starting empty. Run "Rebuild drive index" if this vault was synced before.');
   }
 
   async save(): Promise<void> {
     if (!this.dirty) return;
     await ensureDir(this.app, '.neogdsync');
-    await this.app.vault.adapter.write(normalizePath(INDEX_PATH), JSON.stringify(this.index, null, 2));
+    const adapter = this.app.vault.adapter;
+    // Write-then-rename so a crash mid-write never leaves a corrupt index.db.
+    await adapter.write(normalizePath(TMP_PATH), JSON.stringify(this.index, null, 2));
+    if (await adapter.exists(normalizePath(INDEX_PATH))) {
+      await adapter.remove(normalizePath(INDEX_PATH));
+    }
+    await adapter.rename(normalizePath(TMP_PATH), normalizePath(INDEX_PATH));
     this.dirty = false;
   }
 

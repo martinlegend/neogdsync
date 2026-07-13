@@ -11,14 +11,17 @@ export interface AccessToken {
   expiresAt: number;
 }
 
-let cached: AccessToken | null = null;
+// Keyed by refreshToken+proxyUrl so switching accounts or proxies never
+// serves a stale token from the previous identity.
+let cached: { key: string; value: AccessToken } | null = null;
 
 export async function getAccessToken(
   refreshToken: string,
   proxyUrl: string = DEFAULT_PROXY_URL,
 ): Promise<string> {
-  if (cached && Date.now() < cached.expiresAt - 60_000) {
-    return cached.token;
+  const key = `${proxyUrl}\n${refreshToken}`;
+  if (cached && cached.key === key && Date.now() < cached.value.expiresAt - 60_000) {
+    return cached.value.token;
   }
   const resp = await requestUrl({
     url: proxyUrl,
@@ -32,8 +35,8 @@ export async function getAccessToken(
   });
   if (resp.status >= 400) throw new Error(`Auth failed: ${resp.status}`);
   const { access_token, expires_in } = resp.json as { access_token: string; expires_in: number };
-  cached = { token: access_token, expiresAt: Date.now() + expires_in * 1000 };
-  return cached.token;
+  cached = { key, value: { token: access_token, expiresAt: Date.now() + expires_in * 1000 } };
+  return access_token;
 }
 
 export function clearTokenCache() {

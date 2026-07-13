@@ -7,7 +7,8 @@ import { DriveApi } from './driveApi';
 import { PathIndex } from './pathIndex';
 import { VaultSnapshot } from './snapshot';
 import { Syncer, SyncResult, normFolder } from './syncer';
-import { clearTokenCache } from './auth';
+import { isExcluded } from './exclude';
+import { clearTokenCache, DEFAULT_PROXY_URL } from './auth';
 
 // Lives under .neogdsync/ so it is excluded from sync (see exclude()).
 const ERROR_LOG_PATH = '.neogdsync/sync-errors.log';
@@ -21,6 +22,10 @@ export default class NeoGDSync extends Plugin {
   index!: PathIndex;
   snapshot!: VaultSnapshot;
   private syncing = false;
+  // Paths written by the sync run currently in flight; vault events for these
+  // are echoes of our own writes and must be ignored. User edits made during a
+  // sync are NOT in this set, so they still queue up normally.
+  private activeSyncWrites?: ReadonlySet<string>;
   private statusEl?: HTMLElement;
 
   // ── Lifecycle ──────────────────────────────────────────────────
@@ -29,7 +34,7 @@ export default class NeoGDSync extends Plugin {
     this.snapshot = new VaultSnapshot(this.app);
     await this.loadSettings();
 
-    this.drive = new DriveApi(this.settings.refreshToken);
+    this.drive = new DriveApi(this.settings.refreshToken, this.settings.authProxyUrl);
     this.index = new PathIndex(this.app, this.drive, this.settings.vaultRootId);
     await this.index.load();
 
@@ -80,16 +85,11 @@ export default class NeoGDSync extends Plugin {
   }
 
   exclude(path: string): boolean {
-    if (path.startsWith('.neogdsync'))       return true;
-    if (path.startsWith(this.app.vault.configDir)) return true;
-    if (path.startsWith('.smart-env'))       return true;
-    if (path.startsWith('.smtcmp'))          return true;
-    if (path.endsWith('.DS_Store'))          return true;
-    return false;
+    return isExcluded(path, this.app.vault.configDir, this.settings.excludePaths);
   }
 
   private handleCreate(f: TAbstractFile) {
-    if (this.syncing) return;
+    if (this.activeSyncWrites?.has(f.path)) return;
     if (this.exclude(f.path)) return;
     if (!(f instanceof TFile)) return;
     const cur = this.pendingOps[f.path];
@@ -103,7 +103,7 @@ export default class NeoGDSync extends Plugin {
   }
 
   private handleModify(f: TAbstractFile) {
-    if (this.syncing) return;
+    if (this.activeSyncWrites?.has(f.path)) return;
     if (this.exclude(f.path) || !(f instanceof TFile)) return;
     const snap = this.snapshot.get(f.path);
     if (snap && Math.abs(f.stat.mtime - snap.mtime) <= 2000 && f.stat.size === snap.size) return;
@@ -115,6 +115,7 @@ export default class NeoGDSync extends Plugin {
   }
 
   private handleDelete(f: TAbstractFile) {
+    if (this.activeSyncWrites?.has(f.path)) return;
     if (this.exclude(f.path)) return;
     if (this.pendingOps[f.path] === 'create') {
       delete this.pendingOps[f.path];
@@ -158,6 +159,11 @@ export default class NeoGDSync extends Plugin {
       console.debug('[NeoGDSync] No snapshot — saving current vault as baseline');
       this.snapshot.save(p => this.exclude(p));
       void this.saveSettings();
+      // Baseline means existing files won't be treated as offline creates, so a
+      // fresh install with a non-empty vault must be initialized explicitly.
+      if (this.app.vault.getFiles().length > 0 && this.index.allPaths().length === 0) {
+        new Notice('NeoGDSync: first run — use Force Push (or Force Pull) once to initialize sync', 10000);
+      }
       return;
     }
 
@@ -202,6 +208,7 @@ export default class NeoGDSync extends Plugin {
         this.settings, this.pendingOps,
         (msg: string) => { notice.setMessage(msg); },
       );
+      this.activeSyncWrites = syncer.syncWrites;
 
       let result: SyncResult;
       if (mode === 'push') result = await syncer.forcePush(folder);
@@ -242,17 +249,19 @@ export default class NeoGDSync extends Plugin {
       console.error('[NeoGDSync]', err);
       await this.logSyncFailure(mode, null, msg);
       this.syncing = false;
+      this.activeSyncWrites = undefined;
       this.updateStatus();
       return;
     }
 
-    // Keep syncing=true for 600ms so vault events fired by writeLocal/modifyBinary
-    // (which fire asynchronously) are still suppressed. Then re-save snapshot with
-    // fresh TFile stats.
+    // Keep suppression active for 600ms so vault events fired by writeLocal/modifyBinary
+    // (which fire asynchronously) are still matched against syncWrites. Then re-save
+    // snapshot with fresh TFile stats.
     setTimeout(() => {
       this.snapshot.save(p => this.exclude(p));
       void this.saveSettings().finally(() => {
         this.syncing = false;
+        this.activeSyncWrites = undefined;
         this.updateStatus();
       });
     }, 600);
@@ -458,7 +467,7 @@ class NeoSettingsTab extends PluginSettingTab {
         .setWarning()
         .onClick(async () => {
           this.plugin.settings.refreshToken = '';
-          this.plugin.drive = new DriveApi('');
+          this.plugin.drive.setAuth('', this.plugin.settings.authProxyUrl);
           clearTokenCache();
           await this.plugin.saveSettings();
           this.display();
@@ -480,10 +489,9 @@ class NeoSettingsTab extends PluginSettingTab {
       .addText(t => t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
         .onChange(async v => {
           this.plugin.settings.refreshToken = v.trim();
-          this.plugin.drive = new DriveApi(v.trim());
+          this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
           clearTokenCache();
           await this.plugin.saveSettings();
-          this.display();
         }));
 
     new Setting(containerEl)
@@ -496,6 +504,33 @@ class NeoSettingsTab extends PluginSettingTab {
             this.plugin.settings.vaultRootId = v.trim();
             this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
             await this.plugin.index.load();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Auth proxy URL')
+      .setDesc('OAuth token-refresh proxy. Leave as default, or point to your own deployment of oauth-proxy/worker.js.')
+      .addText(t => {
+        t.inputEl.addClass('neogdsync-monospace-input');
+        t.setPlaceholder(DEFAULT_PROXY_URL).setValue(this.plugin.settings.authProxyUrl)
+          .onChange(async v => {
+            this.plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
+            this.plugin.drive.setAuth(this.plugin.settings.refreshToken, this.plugin.settings.authProxyUrl);
+            clearTokenCache();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Excluded paths')
+      .setDesc('Glob patterns to skip, one per line (e.g. Templates/**, **/*.tmp).')
+      .addTextArea(t => {
+        t.inputEl.rows = 5;
+        t.inputEl.addClass('neogdsync-monospace-input');
+        t.setValue(this.plugin.settings.excludePaths.join('\n'))
+          .onChange(async v => {
+            this.plugin.settings.excludePaths = v.split('\n').map(s => s.trim()).filter(Boolean);
             await this.plugin.saveSettings();
           });
       });

@@ -33,7 +33,7 @@ You can obtain one via:
 - The [Google Drive for Desktop](https://www.google.com/drive/download/) OAuth flow
 - Any OAuth2 tool using scope `https://www.googleapis.com/auth/drive`
 
-The token is stored locally in your vault's plugin data and never leaves your device except to authenticate with Google.
+The refresh token is stored locally in your vault's plugin data. To obtain short-lived access tokens, the plugin sends the refresh token to an OAuth proxy (by default the NeoGDSync Cloudflare Worker, see `oauth-proxy/worker.js`), which exchanges it with Google and returns the access token. The proxy does not store tokens. If you prefer not to route through the shared proxy, deploy your own Worker (instructions in `oauth-proxy/worker.js`) and set its URL in **Settings → NeoGDSync → Auth proxy URL**.
 
 ## Commands
 
