@@ -349,13 +349,14 @@ export class Syncer {
           console.warn(`[NeoGDSync] revision prune failed for ${path}:`, err));
       }
     } else {
-      // A 'modify' op with no index entry means the index was lost or reset
-      // (the file existed before). Look the file up on Drive by path before
-      // uploading, otherwise every push after an index loss creates a duplicate.
-      let existingId: string | null = null;
-      if (op === 'modify') {
-        existingId = await this.index.findOnDrive(path);
-      }
+      // No index entry means either the index was lost/reset (file existed before,
+      // 'modify') or this device never learned about the file at all — e.g. another
+      // device already pushed the same path while this device's index was stale
+      // ('create'). Both cases must look the file up on Drive by path before
+      // uploading, otherwise the push silently creates a same-name duplicate that
+      // no conflict check ever sees, since conflict detection only fires for paths
+      // already present in the local index.
+      const existingId = await this.index.findOnDrive(path);
       if (existingId) {
         await this.drive.updateFile(existingId, bytes, mimeType, mtime, this.settings.keepRevisions);
         this.index.set(path, { driveId: existingId, driveMtime: mtime, syncedAt: Date.now(), isFolder: false });

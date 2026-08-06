@@ -903,10 +903,7 @@ var Syncer = class {
         this.drive.pruneRevisions(cached2.driveId, keepCount).catch((err) => console.warn(`[NeoGDSync] revision prune failed for ${path}:`, err));
       }
     } else {
-      let existingId = null;
-      if (op === "modify") {
-        existingId = await this.index.findOnDrive(path);
-      }
+      const existingId = await this.index.findOnDrive(path);
       if (existingId) {
         await this.drive.updateFile(existingId, bytes, mimeType, mtime, this.settings.keepRevisions);
         this.index.set(path, { driveId: existingId, driveMtime: mtime, syncedAt: Date.now(), isFolder: false });
