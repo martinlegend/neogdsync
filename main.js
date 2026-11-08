@@ -964,7 +964,7 @@ var Syncer = class {
         const localFile = this.app.vault.getAbstractFileByPath((0, import_obsidian4.normalizePath)(path));
         if (localFile) {
           this.syncWrites.add(path);
-          await this.app.vault.trash(localFile, true);
+          await this.app.fileManager.trashFile(localFile);
           this.index.delete(path);
           result.deleted.push(path);
           delete this.pendingOps[path];
@@ -1075,10 +1075,10 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
     });
     new import_obsidian5.Notice("Sync plugin loaded");
   }
-  async onunload() {
+  onunload() {
+    window.clearTimeout(this.saveTimer);
     this.snapshot.save((p) => this.exclude(p));
-    await this.saveSettings();
-    await this.index.save();
+    void this.saveSettings().then(() => this.index.save());
   }
   // ── Vault events ───────────────────────────────────────────────
   registerEvents() {
@@ -1220,7 +1220,7 @@ var NeoGDSync = class extends import_obsidian5.Plugin {
       await this.index.save();
       const summary = `\u2191${result.pushed.length} \u2193${result.pulled.length} \u{1F5D1}${result.deleted.length}` + (result.conflicts.length ? ` \u26A0\uFE0F${result.conflicts.length} conflicts` : "") + (result.errors.length ? ` \u274C${result.errors.length} errors` : "");
       notice.setMessage(`Done \u2014 ${summary}`);
-      setTimeout(() => notice.hide(), 4e3);
+      window.setTimeout(() => notice.hide(), 4e3);
       if (result.errors.length) {
         console.error("[NeoGDSync] Errors:", result.errors);
         await this.logSyncFailure(mode, result);
@@ -1238,7 +1238,7 @@ Details in ${ERROR_LOG_PATH} (click to dismiss)`,
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       notice.setMessage(`Sync error: ${msg}`);
-      setTimeout(() => notice.hide(), 5e3);
+      window.setTimeout(() => notice.hide(), 5e3);
       console.error("[NeoGDSync]", err);
       await this.logSyncFailure(mode, null, msg);
       this.syncing = false;
@@ -1246,7 +1246,7 @@ Details in ${ERROR_LOG_PATH} (click to dismiss)`,
       this.updateStatus();
       return;
     }
-    setTimeout(() => {
+    window.setTimeout(() => {
       this.snapshot.save((p) => this.exclude(p));
       void this.saveSettings().finally(() => {
         this.syncing = false;
@@ -1291,11 +1291,11 @@ Details in ${ERROR_LOG_PATH} (click to dismiss)`,
     try {
       await this.index.rebuild((msg) => notice.setMessage(msg));
       notice.setMessage("Drive index rebuilt");
-      setTimeout(() => notice.hide(), 3e3);
+      window.setTimeout(() => notice.hide(), 3e3);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       notice.setMessage(`Rebuild failed: ${msg}`);
-      setTimeout(() => notice.hide(), 5e3);
+      window.setTimeout(() => notice.hide(), 5e3);
     } finally {
       this.syncing = false;
       this.updateStatus();
@@ -1321,8 +1321,8 @@ Details in ${ERROR_LOG_PATH} (click to dismiss)`,
     this.statusEl.setText(txt);
   }
   debouncedSave() {
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => {
+    window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
       void this.saveSettings();
     }, 500);
   }
@@ -1432,107 +1432,200 @@ var ConflictModal = class extends import_obsidian5.Modal {
     this.contentEl.empty();
   }
 };
+function markDestructive(b) {
+  const withNew = b;
+  return typeof withNew.setDestructive === "function" ? withNew.setDestructive() : b.setWarning();
+}
 var NeoSettingsTab = class extends import_obsidian5.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
+  /** Re-render after state changes: `update()` on 1.13+, full `display()` before that. */
+  refresh() {
+    if (typeof this.update === "function") this.update();
+    else this.display();
+  }
+  /** Declarative rows (Obsidian 1.13+): makes every setting reachable from settings search. */
+  getSettingDefinitions() {
+    return this.rows().map(({ render, ...rest }) => ({
+      ...rest,
+      render: (setting, group) => {
+        render(setting, group);
+      }
+    }));
+  }
+  /** Imperative fallback for Obsidian < 1.13, which never calls getSettingDefinitions(). */
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian5.Setting(containerEl).setHeading();
-    const proxyUrl = this.plugin.settings.authProxyUrl;
-    const isConnected = !!this.plugin.settings.refreshToken;
-    const authSetting = new import_obsidian5.Setting(containerEl).setName("Google Drive").setDesc(isConnected ? "\u2705 Connected \u2014 token saved" : "Not connected");
-    if (isConnected) {
-      authSetting.addButton((b) => b.setButtonText("Disconnect").setWarning().onClick(async () => {
-        this.plugin.settings.refreshToken = "";
-        this.plugin.drive.setAuth("", this.plugin.settings.authProxyUrl);
-        clearTokenCache();
-        await this.plugin.saveSettings();
-        this.display();
-      }));
-    } else {
-      authSetting.addButton((b) => b.setButtonText("Connect Google Drive").setCta().onClick(() => {
-        window.open(`${proxyUrl}/authorize`, "_blank");
-        this.display();
-      }));
+    for (const row of this.rows()) {
+      if (row.visible === false) continue;
+      const setting = new import_obsidian5.Setting(containerEl);
+      setting.setName(row.name);
+      if (row.desc) setting.setDesc(row.desc);
+      row.render(setting, void 0);
     }
-    let tokenInputEl;
-    new import_obsidian5.Setting(containerEl).setName("Refresh token").setDesc(isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.').addText((t) => {
-      t.inputEl.type = "password";
-      tokenInputEl = t.inputEl;
-      t.setPlaceholder("1//05o\u2026").setValue(this.plugin.settings.refreshToken).onChange(async (v) => {
-        this.plugin.settings.refreshToken = v.trim();
-        this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
-        clearTokenCache();
-        await this.plugin.saveSettings();
-      });
-    }).addExtraButton((b) => b.setIcon("eye").setTooltip("Show/hide token").onClick(() => {
-      if (!tokenInputEl) return;
-      tokenInputEl.type = tokenInputEl.type === "password" ? "text" : "password";
-    }));
-    new import_obsidian5.Setting(containerEl).setName("Vault root folder ID").setDesc("Google Drive folder ID that is the root of this vault. Change requires plugin reload.").addText((t) => {
-      t.inputEl.addClass("neogdsync-monospace-input");
-      t.setPlaceholder("Root folder ID").setValue(this.plugin.settings.vaultRootId).onChange(async (v) => {
-        this.plugin.settings.vaultRootId = v.trim();
-        this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
-        await this.plugin.index.load();
-        await this.plugin.saveSettings();
-      });
-    });
-    new import_obsidian5.Setting(containerEl).setName("Auth proxy URL").setDesc("OAuth token-refresh proxy. Leave as default, or point to your own deployment of oauth-proxy/worker.js.").addText((t) => {
-      t.inputEl.addClass("neogdsync-monospace-input");
-      t.setPlaceholder(DEFAULT_PROXY_URL).setValue(this.plugin.settings.authProxyUrl).onChange(async (v) => {
-        this.plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
-        this.plugin.drive.setAuth(this.plugin.settings.refreshToken, this.plugin.settings.authProxyUrl);
-        clearTokenCache();
-        await this.plugin.saveSettings();
-      });
-    });
-    new import_obsidian5.Setting(containerEl).setName("Excluded paths").setDesc("Glob patterns to skip, one per line (e.g. Templates/**, **/*.tmp).").addTextArea((t) => {
-      t.inputEl.rows = 5;
-      t.inputEl.addClass("neogdsync-monospace-input");
-      t.setValue(this.plugin.settings.excludePaths.join("\n")).onChange(async (v) => {
-        this.plugin.settings.excludePaths = v.split("\n").map((s) => s.trim()).filter(Boolean);
-        await this.plugin.saveSettings();
-      });
-    });
-    new import_obsidian5.Setting(containerEl).setName("Sync mode").setDesc("Default sync mode when using ribbon icon").addDropdown((d) => d.addOption("smart", "Smart (conflict detect)").addOption("push", "Force push").addOption("pull", "Force pull").setValue(this.plugin.settings.syncMode).onChange(async (v) => {
-      this.plugin.settings.syncMode = v;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian5.Setting(containerEl).setName("Keep revisions").setDesc("Keep file revisions on drive (version history)").addToggle((t) => t.setValue(this.plugin.settings.keepRevisions).onChange(async (v) => {
-      this.plugin.settings.keepRevisions = v;
-      await this.plugin.saveSettings();
-      this.display();
-    }));
-    if (this.plugin.settings.keepRevisions) {
-      new import_obsidian5.Setting(containerEl).setName("Revisions to keep \u2014 notes").setDesc('After each push, older pinned revisions of text/Markdown files beyond this count are permanently deleted (drive cannot "unpin" a revision, only delete it).').addText((t) => t.setValue(String(this.plugin.settings.revisionKeepCount)).onChange(async (v) => {
-        const n = parseInt(v, 10);
-        if (Number.isFinite(n) && n >= 1) {
-          this.plugin.settings.revisionKeepCount = n;
-          await this.plugin.saveSettings();
+  }
+  rows() {
+    const plugin = this.plugin;
+    const settings = plugin.settings;
+    const isConnected = !!settings.refreshToken;
+    const toPositiveInt = (v) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) && n >= 1 ? n : null;
+    };
+    return [
+      {
+        name: "Google Drive",
+        desc: isConnected ? "\u2705 Connected \u2014 token saved" : "Not connected",
+        aliases: ["connect", "authorize", "oauth", "disconnect"],
+        render: (s) => {
+          if (isConnected) {
+            s.addButton((b) => markDestructive(b.setButtonText("Disconnect")).onClick(async () => {
+              plugin.settings.refreshToken = "";
+              plugin.drive.setAuth("", plugin.settings.authProxyUrl);
+              clearTokenCache();
+              await plugin.saveSettings();
+              this.refresh();
+            }));
+          } else {
+            s.addButton((b) => b.setButtonText("Connect Google Drive").setCta().onClick(() => {
+              window.open(`${plugin.settings.authProxyUrl}/authorize`, "_blank");
+              this.refresh();
+            }));
+          }
         }
-      }));
-      new import_obsidian5.Setting(containerEl).setName("Revisions to keep \u2014 attachments").setDesc("Same, but for binary attachments (images, PDFs, office docs, \u2026). These are usually replaced wholesale rather than edited, so a lower count is recommended.").addText((t) => t.setValue(String(this.plugin.settings.binaryRevisionKeepCount)).onChange(async (v) => {
-        const n = parseInt(v, 10);
-        if (Number.isFinite(n) && n >= 1) {
-          this.plugin.settings.binaryRevisionKeepCount = n;
-          await this.plugin.saveSettings();
+      },
+      {
+        name: "Refresh token",
+        desc: isConnected ? "Token is set. Re-paste to update." : 'Complete "Connect" above, then paste the token here.',
+        aliases: ["token", "credentials"],
+        render: (s) => {
+          let tokenInputEl;
+          s.addText((t) => {
+            t.inputEl.type = "password";
+            tokenInputEl = t.inputEl;
+            t.setPlaceholder("1//05o\u2026").setValue(plugin.settings.refreshToken).onChange(async (v) => {
+              plugin.settings.refreshToken = v.trim();
+              plugin.drive.setAuth(v.trim(), plugin.settings.authProxyUrl);
+              clearTokenCache();
+              await plugin.saveSettings();
+            });
+          }).addExtraButton((b) => b.setIcon("eye").setTooltip("Show/hide token").onClick(() => {
+            if (!tokenInputEl) return;
+            tokenInputEl.type = tokenInputEl.type === "password" ? "text" : "password";
+          }));
         }
-      }));
-    }
-    new import_obsidian5.Setting(containerEl).setName("Pending ops").setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`).addButton((b) => b.setButtonText("Clear all").onClick(async () => {
-      this.plugin.pendingOps = {};
-      await this.plugin.saveSettings();
-      this.plugin.updateStatus();
-      this.display();
-    }));
-    new import_obsidian5.Setting(containerEl).setName("Rebuild drive index").setDesc("Crawl drive vault from root and rebuild local index").addButton((b) => b.setButtonText("Rebuild").onClick(() => {
-      void this.plugin.rebuildIndex();
-    }));
-    new import_obsidian5.Setting(containerEl).setName("Status").setHeading();
-    new import_obsidian5.Setting(containerEl).setName(`Last sync: ${this.plugin.settings.lastSyncedAt ? new Date(this.plugin.settings.lastSyncedAt).toLocaleString() : "never"}`).setDesc(`Conflicts: ${this.plugin.conflicts.length}`);
+      },
+      {
+        name: "Vault root folder ID",
+        desc: "Google Drive folder ID that is the root of this vault. Change requires plugin reload.",
+        aliases: ["drive folder", "root"],
+        render: (s) => s.addText((t) => {
+          t.inputEl.addClass("neogdsync-monospace-input");
+          t.setPlaceholder("Root folder ID").setValue(plugin.settings.vaultRootId).onChange(async (v) => {
+            plugin.settings.vaultRootId = v.trim();
+            plugin.index = new PathIndex(plugin.app, plugin.drive, v.trim());
+            await plugin.index.load();
+            await plugin.saveSettings();
+          });
+        })
+      },
+      {
+        name: "Auth proxy URL",
+        desc: "OAuth token-refresh proxy. Leave as default, or point to your own deployment of oauth-proxy/worker.js (see the README on self-hosting).",
+        aliases: ["proxy", "worker", "self-host", "cloudflare"],
+        render: (s) => s.addText((t) => {
+          t.inputEl.addClass("neogdsync-monospace-input");
+          t.setPlaceholder(DEFAULT_PROXY_URL).setValue(plugin.settings.authProxyUrl).onChange(async (v) => {
+            plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
+            plugin.drive.setAuth(plugin.settings.refreshToken, plugin.settings.authProxyUrl);
+            clearTokenCache();
+            await plugin.saveSettings();
+          });
+        })
+      },
+      {
+        name: "Excluded paths",
+        desc: "Glob patterns to skip, one per line (e.g. Templates/**, **/*.tmp).",
+        aliases: ["exclude", "ignore", "glob"],
+        render: (s) => s.addTextArea((t) => {
+          t.inputEl.rows = 5;
+          t.inputEl.addClass("neogdsync-monospace-input");
+          t.setValue(plugin.settings.excludePaths.join("\n")).onChange(async (v) => {
+            plugin.settings.excludePaths = v.split("\n").map((x) => x.trim()).filter(Boolean);
+            await plugin.saveSettings();
+          });
+        })
+      },
+      {
+        name: "Sync mode",
+        desc: "Default sync mode when using ribbon icon",
+        render: (s) => s.addDropdown((d) => d.addOption("smart", "Smart (conflict detect)").addOption("push", "Force push").addOption("pull", "Force pull").setValue(plugin.settings.syncMode).onChange(async (v) => {
+          plugin.settings.syncMode = v;
+          await plugin.saveSettings();
+        }))
+      },
+      {
+        name: "Keep revisions",
+        desc: "Keep file revisions on drive (version history)",
+        aliases: ["version history"],
+        render: (s) => s.addToggle((t) => t.setValue(plugin.settings.keepRevisions).onChange(async (v) => {
+          plugin.settings.keepRevisions = v;
+          await plugin.saveSettings();
+          this.refresh();
+        }))
+      },
+      {
+        name: "Revisions to keep \u2014 notes",
+        desc: 'After each push, older pinned revisions of text/Markdown files beyond this count are permanently deleted (drive cannot "unpin" a revision, only delete it).',
+        visible: settings.keepRevisions,
+        render: (s) => s.addText((t) => t.setValue(String(plugin.settings.revisionKeepCount)).onChange(async (v) => {
+          const n = toPositiveInt(v);
+          if (n !== null) {
+            plugin.settings.revisionKeepCount = n;
+            await plugin.saveSettings();
+          }
+        }))
+      },
+      {
+        name: "Revisions to keep \u2014 attachments",
+        desc: "Same, but for binary attachments (images, PDFs, office docs, \u2026). These are usually replaced wholesale rather than edited, so a lower count is recommended.",
+        visible: settings.keepRevisions,
+        render: (s) => s.addText((t) => t.setValue(String(plugin.settings.binaryRevisionKeepCount)).onChange(async (v) => {
+          const n = toPositiveInt(v);
+          if (n !== null) {
+            plugin.settings.binaryRevisionKeepCount = n;
+            await plugin.saveSettings();
+          }
+        }))
+      },
+      {
+        name: "Pending ops",
+        desc: `${Object.keys(plugin.pendingOps).length} files queued`,
+        aliases: ["queue"],
+        render: (s) => s.addButton((b) => b.setButtonText("Clear all").onClick(async () => {
+          plugin.pendingOps = {};
+          await plugin.saveSettings();
+          plugin.updateStatus();
+          this.refresh();
+        }))
+      },
+      {
+        name: "Rebuild drive index",
+        desc: "Crawl drive vault from root and rebuild local index",
+        render: (s) => s.addButton((b) => b.setButtonText("Rebuild").onClick(() => {
+          void plugin.rebuildIndex();
+        }))
+      },
+      {
+        name: `Last sync: ${settings.lastSyncedAt ? new Date(settings.lastSyncedAt).toLocaleString() : "never"}`,
+        desc: `Conflicts: ${plugin.conflicts.length}`,
+        aliases: ["status", "conflicts"],
+        render: () => {
+        }
+      }
+    ];
   }
 };

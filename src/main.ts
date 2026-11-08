@@ -1,7 +1,8 @@
 import {
   Plugin, Notice, TFile, TAbstractFile,
-  PluginSettingTab, App, Setting, Modal,
+  PluginSettingTab, App, Setting, Modal, ButtonComponent,
 } from 'obsidian';
+import type { SettingDefinitionItem, SettingDefinitionRender, SettingGroup } from 'obsidian';
 import { NeoSettings, DEFAULT_SETTINGS, PendingOps, ConflictRecord, Snapshot } from './types';
 import { DriveApi } from './driveApi';
 import { PathIndex } from './pathIndex';
@@ -68,11 +69,12 @@ export default class NeoGDSync extends Plugin {
     new Notice('Sync plugin loaded');
   }
 
-  async onunload() {
-    // snapshot.save() MUST come before saveSettings() so fresh stats are persisted
+  onunload() {
+    // snapshot.save() MUST come before saveSettings() so fresh stats are persisted.
+    // onunload must return void (Plugin contract); the async tail is fire-and-forget.
+    window.clearTimeout(this.saveTimer);
     this.snapshot.save(p => this.exclude(p));
-    await this.saveSettings();
-    await this.index.save();
+    void this.saveSettings().then(() => this.index.save());
   }
 
   // ── Vault events ───────────────────────────────────────────────
@@ -224,7 +226,7 @@ export default class NeoGDSync extends Plugin {
         (result.conflicts.length ? ` ⚠️${result.conflicts.length} conflicts` : '') +
         (result.errors.length ? ` ❌${result.errors.length} errors` : '');
       notice.setMessage(`Done — ${summary}`);
-      setTimeout(() => notice.hide(), 4000);
+      window.setTimeout(() => notice.hide(), 4000);
 
       if (result.errors.length) {
         console.error('[NeoGDSync] Errors:', result.errors);
@@ -245,7 +247,7 @@ export default class NeoGDSync extends Plugin {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       notice.setMessage(`Sync error: ${msg}`);
-      setTimeout(() => notice.hide(), 5000);
+      window.setTimeout(() => notice.hide(), 5000);
       console.error('[NeoGDSync]', err);
       await this.logSyncFailure(mode, null, msg);
       this.syncing = false;
@@ -257,7 +259,7 @@ export default class NeoGDSync extends Plugin {
     // Keep suppression active for 600ms so vault events fired by writeLocal/modifyBinary
     // (which fire asynchronously) are still matched against syncWrites. Then re-save
     // snapshot with fresh TFile stats.
-    setTimeout(() => {
+    window.setTimeout(() => {
       this.snapshot.save(p => this.exclude(p));
       void this.saveSettings().finally(() => {
         this.syncing = false;
@@ -302,11 +304,11 @@ export default class NeoGDSync extends Plugin {
     try {
       await this.index.rebuild(msg => notice.setMessage(msg));
       notice.setMessage('Drive index rebuilt');
-      setTimeout(() => notice.hide(), 3000);
+      window.setTimeout(() => notice.hide(), 3000);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       notice.setMessage(`Rebuild failed: ${msg}`);
-      setTimeout(() => notice.hide(), 5000);
+      window.setTimeout(() => notice.hide(), 5000);
     } finally {
       this.syncing = false;
       this.updateStatus();
@@ -330,10 +332,10 @@ export default class NeoGDSync extends Plugin {
 
   // ── Settings ───────────────────────────────────────────────────
 
-  private saveTimer?: ReturnType<typeof setTimeout>;
+  private saveTimer?: number;
   debouncedSave() {
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => { void this.saveSettings(); }, 500);
+    window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => { void this.saveSettings(); }, 500);
   }
 
   async loadSettings() {
@@ -444,170 +446,215 @@ class ConflictModal extends Modal {
 
 // ── Settings Tab ───────────────────────────────────────────────
 
+type SettingRow = Pick<SettingDefinitionRender, 'name' | 'desc' | 'aliases' | 'visible'> & {
+  render: (setting: Setting, group: SettingGroup) => unknown;
+};
+
+/** `setDestructive()` replaces `setWarning()` on Obsidian 1.13+; keep the old call for 1.6–1.12. */
+function markDestructive(b: ButtonComponent): ButtonComponent {
+  const withNew = b as ButtonComponent & { setDestructive?: () => ButtonComponent };
+  return typeof withNew.setDestructive === 'function' ? withNew.setDestructive() : b.setWarning();
+}
+
 class NeoSettingsTab extends PluginSettingTab {
   constructor(app: App, private plugin: NeoGDSync) { super(app, plugin); }
 
+  /** Re-render after state changes: `update()` on 1.13+, full `display()` before that. */
+  private refresh() {
+    if (typeof this.update === 'function') this.update();
+    else this.display();
+  }
+
+  /** Declarative rows (Obsidian 1.13+): makes every setting reachable from settings search. */
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return this.rows().map(({ render, ...rest }) => ({
+      ...rest,
+      render: (setting: Setting, group: SettingGroup) => { render(setting, group); },
+    }));
+  }
+
+  /** Imperative fallback for Obsidian < 1.13, which never calls getSettingDefinitions(). */
   display() {
     const { containerEl } = this;
     containerEl.empty();
-
-    new Setting(containerEl).setHeading();
-
-    // ── Google Drive auth ──────────────────────────────────────
-    const proxyUrl = this.plugin.settings.authProxyUrl;
-    const isConnected = !!this.plugin.settings.refreshToken;
-
-    const authSetting = new Setting(containerEl)
-      .setName('Google Drive')
-      .setDesc(isConnected ? '✅ Connected — token saved' : 'Not connected');
-
-    if (isConnected) {
-      authSetting.addButton(b => b
-        .setButtonText('Disconnect')
-        .setWarning()
-        .onClick(async () => {
-          this.plugin.settings.refreshToken = '';
-          this.plugin.drive.setAuth('', this.plugin.settings.authProxyUrl);
-          clearTokenCache();
-          await this.plugin.saveSettings();
-          this.display();
-        }));
-    } else {
-      authSetting.addButton(b => b
-        .setButtonText('Connect Google Drive')
-        .setCta()
-        .onClick(() => {
-          window.open(`${proxyUrl}/authorize`, '_blank');
-          // After user returns with their token, show the paste field
-          this.display();
-        }));
+    for (const row of this.rows()) {
+      if (row.visible === false) continue;
+      const setting = new Setting(containerEl);
+      setting.setName(row.name);
+      if (row.desc) setting.setDesc(row.desc);
+      // Only the 1.13+ host passes a group; rows ignore it.
+      row.render(setting, undefined as unknown as SettingGroup);
     }
+  }
 
-    let tokenInputEl: HTMLInputElement | undefined;
-    new Setting(containerEl)
-      .setName('Refresh token')
-      .setDesc(isConnected ? 'Token is set. Re-paste to update.' : 'Complete "Connect" above, then paste the token here.')
-      .addText(t => {
-        // Masked by default — this token grants full read/write/delete access to the
-        // user's Drive, and settings tabs are commonly captured in screenshots/screen shares.
-        t.inputEl.type = 'password';
-        tokenInputEl = t.inputEl;
-        t.setPlaceholder('1//05o…').setValue(this.plugin.settings.refreshToken)
+  private rows(): SettingRow[] {
+    const plugin = this.plugin;
+    const settings = plugin.settings;
+    const isConnected = !!settings.refreshToken;
+    const toPositiveInt = (v: string) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) && n >= 1 ? n : null;
+    };
+
+    return [
+      {
+        name: 'Google Drive',
+        desc: isConnected ? '✅ Connected — token saved' : 'Not connected',
+        aliases: ['connect', 'authorize', 'oauth', 'disconnect'],
+        render: s => {
+          if (isConnected) {
+            s.addButton(b => markDestructive(b.setButtonText('Disconnect')).onClick(async () => {
+              plugin.settings.refreshToken = '';
+              plugin.drive.setAuth('', plugin.settings.authProxyUrl);
+              clearTokenCache();
+              await plugin.saveSettings();
+              this.refresh();
+            }));
+          } else {
+            s.addButton(b => b.setButtonText('Connect Google Drive').setCta().onClick(() => {
+              window.open(`${plugin.settings.authProxyUrl}/authorize`, '_blank');
+              this.refresh();
+            }));
+          }
+        },
+      },
+      {
+        name: 'Refresh token',
+        desc: isConnected ? 'Token is set. Re-paste to update.' : 'Complete "Connect" above, then paste the token here.',
+        aliases: ['token', 'credentials'],
+        render: s => {
+          let tokenInputEl: HTMLInputElement | undefined;
+          s.addText(t => {
+            // Masked by default — this token grants full read/write/delete access to the
+            // user's Drive, and settings tabs are commonly captured in screenshots/screen shares.
+            t.inputEl.type = 'password';
+            tokenInputEl = t.inputEl;
+            t.setPlaceholder('1//05o…').setValue(plugin.settings.refreshToken)
+              .onChange(async v => {
+                plugin.settings.refreshToken = v.trim();
+                plugin.drive.setAuth(v.trim(), plugin.settings.authProxyUrl);
+                clearTokenCache();
+                await plugin.saveSettings();
+              });
+          }).addExtraButton(b => b
+            .setIcon('eye')
+            .setTooltip('Show/hide token')
+            .onClick(() => {
+              if (!tokenInputEl) return;
+              tokenInputEl.type = tokenInputEl.type === 'password' ? 'text' : 'password';
+            }));
+        },
+      },
+      {
+        name: 'Vault root folder ID',
+        desc: 'Google Drive folder ID that is the root of this vault. Change requires plugin reload.',
+        aliases: ['drive folder', 'root'],
+        render: s => s.addText(t => {
+          t.inputEl.addClass('neogdsync-monospace-input');
+          t.setPlaceholder('Root folder ID').setValue(plugin.settings.vaultRootId)
+            .onChange(async v => {
+              plugin.settings.vaultRootId = v.trim();
+              plugin.index = new PathIndex(plugin.app, plugin.drive, v.trim());
+              await plugin.index.load();
+              await plugin.saveSettings();
+            });
+        }),
+      },
+      {
+        name: 'Auth proxy URL',
+        desc: 'OAuth token-refresh proxy. Leave as default, or point to your own deployment of oauth-proxy/worker.js (see the README on self-hosting).',
+        aliases: ['proxy', 'worker', 'self-host', 'cloudflare'],
+        render: s => s.addText(t => {
+          t.inputEl.addClass('neogdsync-monospace-input');
+          t.setPlaceholder(DEFAULT_PROXY_URL).setValue(plugin.settings.authProxyUrl)
+            .onChange(async v => {
+              plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
+              plugin.drive.setAuth(plugin.settings.refreshToken, plugin.settings.authProxyUrl);
+              clearTokenCache();
+              await plugin.saveSettings();
+            });
+        }),
+      },
+      {
+        name: 'Excluded paths',
+        desc: 'Glob patterns to skip, one per line (e.g. Templates/**, **/*.tmp).',
+        aliases: ['exclude', 'ignore', 'glob'],
+        render: s => s.addTextArea(t => {
+          t.inputEl.rows = 5;
+          t.inputEl.addClass('neogdsync-monospace-input');
+          t.setValue(plugin.settings.excludePaths.join('\n'))
+            .onChange(async v => {
+              plugin.settings.excludePaths = v.split('\n').map(x => x.trim()).filter(Boolean);
+              await plugin.saveSettings();
+            });
+        }),
+      },
+      {
+        name: 'Sync mode',
+        desc: 'Default sync mode when using ribbon icon',
+        render: s => s.addDropdown(d => d
+          .addOption('smart', 'Smart (conflict detect)')
+          .addOption('push', 'Force push')
+          .addOption('pull', 'Force pull')
+          .setValue(plugin.settings.syncMode)
           .onChange(async v => {
-            this.plugin.settings.refreshToken = v.trim();
-            this.plugin.drive.setAuth(v.trim(), this.plugin.settings.authProxyUrl);
-            clearTokenCache();
-            await this.plugin.saveSettings();
-          });
-      })
-      .addExtraButton(b => b
-        .setIcon('eye')
-        .setTooltip('Show/hide token')
-        .onClick(() => {
-          if (!tokenInputEl) return;
-          tokenInputEl.type = tokenInputEl.type === 'password' ? 'text' : 'password';
-        }));
-
-    new Setting(containerEl)
-      .setName('Vault root folder ID')
-      .setDesc('Google Drive folder ID that is the root of this vault. Change requires plugin reload.')
-      .addText(t => {
-        t.inputEl.addClass('neogdsync-monospace-input');
-        t.setPlaceholder('Root folder ID').setValue(this.plugin.settings.vaultRootId)
+            plugin.settings.syncMode = v as NeoSettings['syncMode'];
+            await plugin.saveSettings();
+          })),
+      },
+      {
+        name: 'Keep revisions',
+        desc: 'Keep file revisions on drive (version history)',
+        aliases: ['version history'],
+        render: s => s.addToggle(t => t.setValue(plugin.settings.keepRevisions)
           .onChange(async v => {
-            this.plugin.settings.vaultRootId = v.trim();
-            this.plugin.index = new PathIndex(this.plugin.app, this.plugin.drive, v.trim());
-            await this.plugin.index.load();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Auth proxy URL')
-      .setDesc('OAuth token-refresh proxy. Leave as default, or point to your own deployment of oauth-proxy/worker.js.')
-      .addText(t => {
-        t.inputEl.addClass('neogdsync-monospace-input');
-        t.setPlaceholder(DEFAULT_PROXY_URL).setValue(this.plugin.settings.authProxyUrl)
+            plugin.settings.keepRevisions = v;
+            await plugin.saveSettings();
+            this.refresh();
+          })),
+      },
+      {
+        name: 'Revisions to keep — notes',
+        desc: 'After each push, older pinned revisions of text/Markdown files beyond this count are permanently deleted (drive cannot "unpin" a revision, only delete it).',
+        visible: settings.keepRevisions,
+        render: s => s.addText(t => t.setValue(String(plugin.settings.revisionKeepCount))
           .onChange(async v => {
-            this.plugin.settings.authProxyUrl = v.trim() || DEFAULT_PROXY_URL;
-            this.plugin.drive.setAuth(this.plugin.settings.refreshToken, this.plugin.settings.authProxyUrl);
-            clearTokenCache();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Excluded paths')
-      .setDesc('Glob patterns to skip, one per line (e.g. Templates/**, **/*.tmp).')
-      .addTextArea(t => {
-        t.inputEl.rows = 5;
-        t.inputEl.addClass('neogdsync-monospace-input');
-        t.setValue(this.plugin.settings.excludePaths.join('\n'))
+            const n = toPositiveInt(v);
+            if (n !== null) { plugin.settings.revisionKeepCount = n; await plugin.saveSettings(); }
+          })),
+      },
+      {
+        name: 'Revisions to keep — attachments',
+        desc: 'Same, but for binary attachments (images, PDFs, office docs, …). These are usually replaced wholesale rather than edited, so a lower count is recommended.',
+        visible: settings.keepRevisions,
+        render: s => s.addText(t => t.setValue(String(plugin.settings.binaryRevisionKeepCount))
           .onChange(async v => {
-            this.plugin.settings.excludePaths = v.split('\n').map(s => s.trim()).filter(Boolean);
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName('Sync mode').setDesc('Default sync mode when using ribbon icon')
-      .addDropdown(d => d
-        .addOption('smart', 'Smart (conflict detect)')
-        .addOption('push', 'Force push')
-        .addOption('pull', 'Force pull')
-        .setValue(this.plugin.settings.syncMode)
-        .onChange(async v => {
-          this.plugin.settings.syncMode = v as NeoSettings['syncMode'];
-          await this.plugin.saveSettings();
-        }));
-
-    new Setting(containerEl)
-      .setName('Keep revisions').setDesc('Keep file revisions on drive (version history)')
-      .addToggle(t => t.setValue(this.plugin.settings.keepRevisions)
-        .onChange(async v => { this.plugin.settings.keepRevisions = v; await this.plugin.saveSettings(); this.display(); }));
-
-    if (this.plugin.settings.keepRevisions) {
-      new Setting(containerEl)
-        .setName('Revisions to keep — notes')
-        .setDesc('After each push, older pinned revisions of text/Markdown files beyond this count are permanently deleted (drive cannot "unpin" a revision, only delete it).')
-        .addText(t => t.setValue(String(this.plugin.settings.revisionKeepCount))
-          .onChange(async v => {
-            const n = parseInt(v, 10);
-            if (Number.isFinite(n) && n >= 1) {
-              this.plugin.settings.revisionKeepCount = n;
-              await this.plugin.saveSettings();
-            }
-          }));
-
-      new Setting(containerEl)
-        .setName('Revisions to keep — attachments')
-        .setDesc('Same, but for binary attachments (images, PDFs, office docs, …). These are usually replaced wholesale rather than edited, so a lower count is recommended.')
-        .addText(t => t.setValue(String(this.plugin.settings.binaryRevisionKeepCount))
-          .onChange(async v => {
-            const n = parseInt(v, 10);
-            if (Number.isFinite(n) && n >= 1) {
-              this.plugin.settings.binaryRevisionKeepCount = n;
-              await this.plugin.saveSettings();
-            }
-          }));
-    }
-
-    new Setting(containerEl)
-      .setName('Pending ops').setDesc(`${Object.keys(this.plugin.pendingOps).length} files queued`)
-      .addButton(b => b.setButtonText('Clear all').onClick(async () => {
-        this.plugin.pendingOps = {};
-        await this.plugin.saveSettings();
-        this.plugin.updateStatus();
-        this.display();
-      }));
-
-    new Setting(containerEl)
-      .setName('Rebuild drive index').setDesc('Crawl drive vault from root and rebuild local index')
-      .addButton(b => b.setButtonText('Rebuild').onClick(() => { void this.plugin.rebuildIndex(); }));
-
-    new Setting(containerEl).setName('Status').setHeading();
-    new Setting(containerEl)
-      .setName(`Last sync: ${this.plugin.settings.lastSyncedAt ? new Date(this.plugin.settings.lastSyncedAt).toLocaleString() : 'never'}`)
-      .setDesc(`Conflicts: ${this.plugin.conflicts.length}`);
+            const n = toPositiveInt(v);
+            if (n !== null) { plugin.settings.binaryRevisionKeepCount = n; await plugin.saveSettings(); }
+          })),
+      },
+      {
+        name: 'Pending ops',
+        desc: `${Object.keys(plugin.pendingOps).length} files queued`,
+        aliases: ['queue'],
+        render: s => s.addButton(b => b.setButtonText('Clear all').onClick(async () => {
+          plugin.pendingOps = {};
+          await plugin.saveSettings();
+          plugin.updateStatus();
+          this.refresh();
+        })),
+      },
+      {
+        name: 'Rebuild drive index',
+        desc: 'Crawl drive vault from root and rebuild local index',
+        render: s => s.addButton(b => b.setButtonText('Rebuild').onClick(() => { void plugin.rebuildIndex(); })),
+      },
+      {
+        name: `Last sync: ${settings.lastSyncedAt ? new Date(settings.lastSyncedAt).toLocaleString() : 'never'}`,
+        desc: `Conflicts: ${plugin.conflicts.length}`,
+        aliases: ['status', 'conflicts'],
+        render: () => { /* informational row */ },
+      },
+    ];
   }
 }

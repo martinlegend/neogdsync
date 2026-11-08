@@ -434,7 +434,7 @@ export class Syncer {
         const localFile = this.app.vault.getAbstractFileByPath(normalizePath(path));
         if (localFile) {
           this.syncWrites.add(path);
-          await this.app.vault.trash(localFile, true);
+          await this.app.fileManager.trashFile(localFile);
           this.index.delete(path);
           result.deleted.push(path);
           delete this.pendingOps[path];

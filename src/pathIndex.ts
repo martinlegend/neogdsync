@@ -31,7 +31,7 @@ export class PathIndex {
     for (const candidate of [INDEX_PATH, TMP_PATH]) {
       try {
         const raw = await this.app.vault.adapter.read(normalizePath(candidate));
-        this.index = JSON.parse(raw);
+        this.index = JSON.parse(raw) as FileIndex;
         return;
       } catch {
         // fall through to next candidate
